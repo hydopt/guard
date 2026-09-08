@@ -113,3 +113,33 @@ func (f *Flow) oauthConfig(p *Provider, r *http.Request) *oauth2.Config {
 		Scopes:       p.Scopes,
 	}
 }
+
+// Provider returns the named provider's configuration.
+func (f *Flow) Provider(name string) (Provider, bool) {
+	p, ok := f.providers[name]
+	if !ok {
+		return Provider{}, false
+	}
+	return *p, true
+}
+
+// Providers returns all providers in registration order.
+func (f *Flow) Providers() []Provider {
+	out := make([]Provider, 0, len(f.order))
+	for _, name := range f.order {
+		out = append(out, *f.providers[name])
+	}
+	return out
+}
+
+// SessionTTL returns the configured session cookie lifetime.
+func (f *Flow) SessionTTL() time.Duration { return f.sessionTTL }
+
+// Secure reports whether cookies are marked Secure.
+func (f *Flow) Secure() bool { return f.secure }
+
+// HomePath returns the fallback redirect target after login.
+func (f *Flow) HomePath() string { return f.homePath }
+
+// SignInPath returns the sign-in page route.
+func (f *Flow) SignInPath() string { return f.signInPath }

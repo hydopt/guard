@@ -9,6 +9,43 @@ Entra ID) and protect HTTP handlers with composable middleware.
 go get github.com/hydopt/bearer
 ```
 
+## Quick start
+
+Wire the sign-in flow, the Google/Microsoft validators, and the auth routes
+into your mux with one call:
+
+```go
+import "github.com/hydopt/bearer/auth"
+
+a, err := auth.Setup(mux,
+    auth.Google("google-client-id"),
+    auth.Microsoft("microsoft-client-id"),
+)
+if err != nil { /* handle — validator construction performs discovery */ }
+
+mux.Handle("/private", a.Flow.RequireLogin(a.Validators)(handler))
+```
+
+`auth.Setup` registers the sign-in page (`/signin`), the provider routes
+(`/auth/{provider}` and their callbacks), and logout (`/auth/logout`), and
+uses sensible defaults: Microsoft accepts any tenant (`"common"`), sessions
+last an hour, and cookies are not marked `Secure` (enter production with
+`auth.WithSecure(true)`).
+
+**About the client secret:** Google and Microsoft register server-side
+("web application") clients as *confidential* clients that must authenticate
+at the token exchange with a `client_secret`. `Setup` picks the secret up from
+`GOOGLE_CLIENT_SECRET` / `AZURE_CLIENT_SECRET` (or an explicit
+`auth.WithGoogleSecret` / `auth.WithMicrosoftSecret`). If you register the
+clients as *public* (SPA/desktop/native types) instead, no secret is needed:
+the PKCE we already send protects the code exchange, and `Setup` simply omits
+the `client_secret`. Either registration works — just make the console match
+the environment you choose.
+
+Other options: `auth.WithTenant(tenantGUID)` to pin Microsoft to a single
+tenant, `auth.WithSessionTTL(...)`, and `auth.WithValidator(name, validator)`
+to swap in custom validators (e.g. national clouds).
+
 ## Usage
 
 ### Validators
