@@ -21,6 +21,10 @@ type User struct {
 	Email         string `json:"email"`
 	VerifiedEmail bool   `json:"emailVerified"`
 	Sub           string `json:"sub"`
+	// Claims holds the raw ID token claims (e.g. groups, roles, custom
+	// claims). Excluded from JSON marshaling so token internals do not leak
+	// into API responses by default.
+	Claims map[string]any `json:"-"`
 }
 
 // getAuthToken returns the bearer credential from the Authorization header

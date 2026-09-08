@@ -64,6 +64,8 @@ func TestGoogleValidateToken(t *testing.T) {
 		assert.Equal(t, "test-sub", user.Id)
 		assert.Equal(t, "test-sub", user.Sub)
 		assert.True(t, user.VerifiedEmail)
+		assert.Equal(t, "user@example.com", user.Claims["email"])
+		assert.Equal(t, clientId, user.Claims["aud"])
 	})
 
 	t.Run("wrongAudience", func(t *testing.T) {

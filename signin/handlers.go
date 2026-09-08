@@ -84,11 +84,17 @@ func (f *Flow) handleStart(p *Provider) http.HandlerFunc {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
+		nonce, err := newState()
+		if err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
 		next := safeRedirect(r.URL.Query().Get("next"), f.homePath)
-		f.writeStateCookie(w, loginRequest{State: state, Next: next, Verifier: verifier})
+		f.writeStateCookie(w, loginRequest{State: state, Next: next, Verifier: verifier, Nonce: nonce})
 		http.Redirect(w, r, f.oauthConfig(p, r).AuthCodeURL(
 			state,
 			oauth2.AccessTypeOnline,
+			oauth2.SetAuthURLParam("nonce", nonce),
 			oauth2.SetAuthURLParam("code_challenge", s256Challenge(verifier)),
 			oauth2.SetAuthURLParam("code_challenge_method", "S256"),
 		), http.StatusFound)
@@ -144,6 +150,15 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 			return
 		}
 
+		// Bind the ID token to this request: the token must echo the nonce we
+		// sent with the authorization request. Prevented token substitution and
+		// replay across separate sign-ins.
+		if nonce, ok := idTokenNonce(idToken); !ok || nonce != req.Nonce {
+			slog.Info("token nonce mismatch", "provider", p.Name)
+			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			return
+		}
+
 		if r.URL.Query().Get("mode") == "token" {
 			writeTokenResponse(w, idToken, f.sessionTTL)
 			return
@@ -155,12 +170,14 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 }
 
 // loginRequest is what the state cookie holds across the OAuth round trip:
-// the CSRF state, the safe same-origin return target, and the PKCE code
-// verifier. JSON keeps any character safe in the cookie value.
+// the CSRF state, the safe same-origin return target, the PKCE code verifier,
+// and the nonce that binds the returned ID token to this request. JSON keeps
+// any character safe in the cookie value.
 type loginRequest struct {
 	State    string `json:"state"`
 	Next     string `json:"next,omitempty"`
 	Verifier string `json:"verifier,omitempty"`
+	Nonce    string `json:"nonce,omitempty"`
 }
 
 func s256Challenge(verifier string) string {
@@ -168,9 +185,17 @@ func s256Challenge(verifier string) string {
 	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
+// handleLogout only honours the logout if the request carries the session
+// cookie. A cross-site form POST cannot send the SameSite=Lax session cookie,
+// so this both ignores meaningless logouts for signed-out visitors and makes
+// logout CSRF ineffective.
 func (f *Flow) handleLogout(w http.ResponseWriter, r *http.Request) {
 	if r.Method != http.MethodPost {
 		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if _, err := r.Cookie(f.cookieName); err != nil {
+		http.Redirect(w, r, f.homePath, http.StatusFound)
 		return
 	}
 	f.clearSessionCookie(w)

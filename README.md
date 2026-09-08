@@ -72,6 +72,10 @@ retrievable with `MustGetTokenFromCtx`. The authenticated user is retrievable
 with `MustGetUserFromCtx`. `RequireMinimumRole` / `RequireWhiteListedEmail`
 reject with 403 (not 401, which is reserved for missing/invalid credentials).
 
+Every `User` also carries the full ID token claim set (`User.Claims`, e.g.
+Microsoft `groups`/`roles` or custom claims). It is excluded from JSON
+serialization so token internals do not leak into API responses by default.
+
 For public pages that show different content (e.g. a user menu) when signed in,
 use `OptionalAuth`, which authenticates when a valid credential is present and
 passes everything else through unauthenticated:
@@ -167,14 +171,19 @@ Notes:
   incoming request, honoring `X-Forwarded-Proto` / `X-Forwarded-Host` so TLS
   termination behind a reverse proxy works; override with `Provider.RedirectURL`
   when you need an exact match.
-- The OAuth start uses PKCE (S256), and the state cookie — which holds the CSRF
-  state, the same-origin `next` target, and the code verifier — is short-lived
-  and http-only. `next` must be a same-origin path to prevent open redirects.
+- The OAuth start uses PKCE (S256) and an OIDC `nonce`; the state cookie —
+  which holds the CSRF state, the same-origin `next` target, the code verifier,
+  and the nonce — is short-lived and http-only. `next` must be a same-origin
+  path to prevent open redirects. The callback re-validates that the ID token
+  echoes the nonce, binding the token to this sign-in.
 - The session cookie holds the provider ID token and is read by
   `RequireVerifiedEmail` via `bearer.SessionCookieName`. Set
   `Config.Secure = true` in production.
 - The cookie never outlives the ID token it stores: its `Max-Age` is clamped to
   the token's `exp` claim (at most `SessionTTL`).
+- `/auth/logout` only clears the session when the request actually carries one,
+  so cross-site logout CSRF (a third-party POST that would otherwise make the
+  server clear the cookie) is ineffective.
 - There is no refresh-token plumbing: sessions last as long as the ID token
   (≈ 1 hour by default, tune `SessionTTL` down but not beyond the token's
   expiry) and then the user signs in again. This keeps the design stateless
@@ -192,6 +201,7 @@ type User struct {
     Email         string
     VerifiedEmail bool
     Sub           string
+    Claims        map[string]any // raw ID token claims
 }
 
 type Middleware func(http.Handler) http.Handler

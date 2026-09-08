@@ -58,6 +58,10 @@ func (g *GoogleTokenValidator) ValidateToken(ctx context.Context, token string) 
 	if err := idToken.Claims(&claims); err != nil {
 		return nil, fmt.Errorf("failed to parse claims: %w", err)
 	}
+	raw, err := rawClaims(idToken)
+	if err != nil {
+		return nil, err
+	}
 	if claims.Email == "" {
 		return nil, errors.New("missing email")
 	}
@@ -73,5 +77,16 @@ func (g *GoogleTokenValidator) ValidateToken(ctx context.Context, token string) 
 		Email:         claims.Email,
 		VerifiedEmail: true,
 		Sub:           claims.Sub,
+		Claims:        raw,
 	}, nil
+}
+
+// rawClaims decodes the full ID token claim set for consumers that need more
+// than the normalized User fields (groups, roles, custom claims).
+func rawClaims(idToken *oidc.IDToken) (map[string]any, error) {
+	var raw map[string]any
+	if err := idToken.Claims(&raw); err != nil {
+		return nil, fmt.Errorf("failed to parse raw claims: %w", err)
+	}
+	return raw, nil
 }

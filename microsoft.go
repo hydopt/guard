@@ -183,6 +183,10 @@ func (m *MicrosoftTokenValidator) ValidateToken(ctx context.Context, token strin
 	if m.pinnedTid != "" && claims.Tid != m.pinnedTid {
 		return nil, fmt.Errorf("token for tenant %q does not match configured tenant %q", claims.Tid, m.pinnedTid)
 	}
+	raw, err := rawClaims(idToken)
+	if err != nil {
+		return nil, err
+	}
 
 	email := claims.Email
 	if email == "" {
@@ -200,6 +204,7 @@ func (m *MicrosoftTokenValidator) ValidateToken(ctx context.Context, token strin
 		Email:         email,
 		VerifiedEmail: true,
 		Sub:           idToken.Subject,
+		Claims:        raw,
 	}, nil
 }
 

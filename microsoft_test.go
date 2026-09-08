@@ -176,6 +176,8 @@ func TestMicrosoftValidateToken(t *testing.T) {
 		assert.Equal(t, "test-sub", user.Id)
 		assert.Equal(t, "test-sub", user.Sub)
 		assert.True(t, user.VerifiedEmail)
+		assert.Equal(t, testTenant, user.Claims["tid"])
+		assert.Equal(t, "user@example.com", user.Claims["email"])
 	})
 
 	t.Run("fallsBackToPreferredUsername", func(t *testing.T) {

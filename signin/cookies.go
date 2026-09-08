@@ -86,12 +86,8 @@ func sessionCookieTTL(sessionTTL time.Duration, idToken string) time.Duration {
 // without verification: the token is validated separately before it reaches
 // the cookie.
 func idTokenExpiry(idToken string) (time.Time, bool) {
-	parts := strings.Split(idToken, ".")
-	if len(parts) != 3 {
-		return time.Time{}, false
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
+	payload, ok := decodeIDTokenPayload(idToken)
+	if !ok {
 		return time.Time{}, false
 	}
 	var claims struct {
@@ -104,4 +100,32 @@ func idTokenExpiry(idToken string) (time.Time, bool) {
 		return time.Time{}, false
 	}
 	return time.Unix(claims.Exp, 0), true
+}
+
+// idTokenNonce reads the "nonce" claim from an unverified JWT. Safe to inspect
+// without verification: the validator has already verified the signature.
+func idTokenNonce(idToken string) (string, bool) {
+	payload, ok := decodeIDTokenPayload(idToken)
+	if !ok {
+		return "", false
+	}
+	var claims struct {
+		Nonce string `json:"nonce"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return "", false
+	}
+	return claims.Nonce, claims.Nonce != ""
+}
+
+func decodeIDTokenPayload(idToken string) ([]byte, bool) {
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		return nil, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return nil, false
+	}
+	return payload, true
 }

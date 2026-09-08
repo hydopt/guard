@@ -20,15 +20,20 @@ import (
 	"golang.org/x/oauth2"
 )
 
-const validIDToken = "valid-id-token"
-
+// fakeValidator accepts any token (the signature is exercised by the real
+// providers). Optionally overrides the resulting user, or rejects with an
+// error to simulate a failed validation.
 type fakeValidator struct {
-	wantToken string
+	user *bearer.User
+	err  error
 }
 
-func (v fakeValidator) ValidateToken(_ context.Context, token string) (*bearer.User, error) {
-	if token != v.wantToken {
-		return nil, bearer.ErrUnauthorized
+func (v fakeValidator) ValidateToken(_ context.Context, _ string) (*bearer.User, error) {
+	if v.err != nil {
+		return nil, v.err
+	}
+	if v.user != nil {
+		return v.user, nil
 	}
 	return &bearer.User{
 		Id:            "user-1",
@@ -39,9 +44,14 @@ func (v fakeValidator) ValidateToken(_ context.Context, token string) (*bearer.U
 }
 
 // newFakeOAuthServer serves /authorize (redirects back with a code) and
-// /token (returns an id_token). Parametrized by the issued id_token value.
-func newFakeOAuthServer(t *testing.T, idToken string) *httptest.Server {
+// /token (returns an id_token carrying the nonce from the authorization
+// request). The issued token is built by issuedToken, which defaults to a
+// valid nonce-bearing JWT.
+func newFakeOAuthServer(t *testing.T, issuedToken func(nonce string) string) *httptest.Server {
 	t.Helper()
+	if issuedToken == nil {
+		issuedToken = func(nonce string) string { return signInIDToken(t, nonce) }
+	}
 	mux := http.NewServeMux()
 	mux.HandleFunc("/authorize", func(w http.ResponseWriter, r *http.Request) {
 		redirectURI, err := url.Parse(r.URL.Query().Get("redirect_uri"))
@@ -49,8 +59,13 @@ func newFakeOAuthServer(t *testing.T, idToken string) *httptest.Server {
 			http.Error(w, "bad redirect_uri", http.StatusBadRequest)
 			return
 		}
+		nonce := r.URL.Query().Get("nonce")
+		if nonce == "" {
+			http.Error(w, "missing nonce", http.StatusBadRequest)
+			return
+		}
 		q := redirectURI.Query()
-		q.Set("code", "auth-code")
+		q.Set("code", base64.RawURLEncoding.EncodeToString([]byte(nonce)))
 		q.Set("state", r.URL.Query().Get("state"))
 		redirectURI.RawQuery = q.Encode()
 		http.Redirect(w, r, redirectURI.String(), http.StatusFound)
@@ -60,7 +75,7 @@ func newFakeOAuthServer(t *testing.T, idToken string) *httptest.Server {
 			http.Error(w, "bad form", http.StatusBadRequest)
 			return
 		}
-		if r.Form.Get("code") != "auth-code" {
+		if r.Form.Get("code") == "" {
 			http.Error(w, "bad code", http.StatusBadRequest)
 			return
 		}
@@ -68,10 +83,15 @@ func newFakeOAuthServer(t *testing.T, idToken string) *httptest.Server {
 			http.Error(w, "missing code_verifier", http.StatusBadRequest)
 			return
 		}
+		nonce, err := base64.RawURLEncoding.DecodeString(r.Form.Get("code"))
+		if err != nil || len(nonce) == 0 {
+			http.Error(w, "bad code", http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "access-token",
-			"id_token":     idToken,
+			"id_token":     issuedToken(string(nonce)),
 			"token_type":   "Bearer",
 		})
 	})
@@ -96,11 +116,11 @@ func provider(oauth *httptest.Server, validator bearer.TokenValidator) Provider 
 	}
 }
 
-func newServer(t *testing.T, issuedToken string, validator bearer.TokenValidator) (*httptest.Server, *http.Client, *url.URL) {
+func newServer(t *testing.T, issuedToken func(nonce string) string, validator bearer.TokenValidator) (*httptest.Server, *http.Client, *url.URL) {
 	t.Helper()
 	oauth := newFakeOAuthServer(t, issuedToken)
 	if validator == nil {
-		validator = fakeValidator{wantToken: issuedToken}
+		validator = fakeValidator{}
 	}
 	flow, err := New(Config{Providers: []Provider{provider(oauth, validator)}})
 	require.NoError(t, err)
@@ -147,117 +167,132 @@ func sessionCookie(jar http.CookieJar, u *url.URL, name string) string {
 	return ""
 }
 
+// startLogin performs the authorization request and, following the redirect to
+// the fake provider, returns the state and code the browser is told to hand
+// back to the callback.
+func startLogin(t *testing.T, client *http.Client, server *httptest.Server, next string) (state, code string) {
+	t.Helper()
+	u := server.URL + "/auth/test"
+	if next != "" {
+		u += "?next=" + url.QueryEscape(next)
+	}
+	resp := get(t, client, u)
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	authorizeURL := resp.Header.Get("Location")
+	auth, err := url.Parse(authorizeURL)
+	require.NoError(t, err)
+	state = auth.Query().Get("state")
+	require.NotEmpty(t, state)
+
+	resp = get(t, client, authorizeURL)
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	location, err := url.Parse(resp.Header.Get("Location"))
+	require.NoError(t, err)
+	code = location.Query().Get("code")
+	require.NotEmpty(t, code)
+	return state, code
+}
+
+func callbackURL(server *httptest.Server, state, code, extra string) string {
+	u := server.URL + "/auth/test/callback?code=" + url.QueryEscape(code) + "&state=" + url.QueryEscape(state)
+	if extra != "" {
+		u += "&" + extra
+	}
+	return u
+}
+
 // completeLogin performs start -> callback, returning the final redirect target.
 func completeLogin(t *testing.T, client *http.Client, server *httptest.Server, next string) string {
 	t.Helper()
-	resp := get(t, client, server.URL+"/auth/test?next="+url.QueryEscape(next))
-	require.Equal(t, http.StatusFound, resp.StatusCode)
+	state, code := startLogin(t, client, server, next)
 
-	location, err := url.Parse(resp.Header.Get("Location"))
-	require.NoError(t, err)
-	state := location.Query().Get("state")
-	require.NotEmpty(t, state)
-
-	callback := server.URL + "/auth/test/callback?code=auth-code&state=" + url.QueryEscape(state)
-	resp = get(t, client, callback)
+	resp := get(t, client, callbackURL(server, state, code, ""))
 	require.Equal(t, http.StatusFound, resp.StatusCode)
 	return resp.Header.Get("Location")
 }
 
 func TestFlow_CompleteLogin(t *testing.T) {
-	server, client, serverURL := newServer(t, validIDToken, nil)
+	server, client, serverURL := newServer(t, nil, nil)
 
 	target := completeLogin(t, client, server, "/dashboard")
 	assert.Equal(t, "/dashboard", target)
-	assert.Equal(t, validIDToken, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
+	claims := idTokenClaims(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
+	assert.Equal(t, "someone@example.com", claims["email"])
+	assert.NotEmpty(t, claims["nonce"], "the token must carry the nonce we sent")
 }
 
 func TestFlow_OpenRedirectBlocked(t *testing.T) {
 	for _, evil := range []string{"https://evil.com", "//evil.com"} {
-		server, client, _ := newServer(t, validIDToken, nil)
+		server, client, _ := newServer(t, nil, nil)
 		target := completeLogin(t, client, server, evil)
 		assert.Equal(t, "/", target, "next=%q must fall back to home", evil)
 	}
 }
 
 func TestFlow_DefaultRedirectTarget(t *testing.T) {
-	server, client, _ := newServer(t, validIDToken, nil)
+	server, client, _ := newServer(t, nil, nil)
 	target := completeLogin(t, client, server, "")
 	assert.Equal(t, "/", target)
 }
 
 func TestFlow_MissingState(t *testing.T) {
-	server, client, _ := newServer(t, validIDToken, nil)
+	server, client, _ := newServer(t, nil, nil)
 	resp := get(t, client, server.URL+"/auth/test/callback?code=auth-code&state=whatever")
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
 func TestFlow_MismatchedState(t *testing.T) {
-	server, client, _ := newServer(t, validIDToken, nil)
+	server, client, _ := newServer(t, nil, nil)
 	// Start a login so a state cookie is present, then present a wrong state.
-	resp := get(t, client, server.URL+"/auth/test")
-	require.Equal(t, http.StatusFound, resp.StatusCode)
+	_, _ = startLogin(t, client, server, "")
 
-	resp = get(t, client, server.URL+"/auth/test/callback?code=auth-code&state=not-the-state")
+	resp := get(t, client, callbackURL(server, "not-the-state", "auth-code", ""))
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
 func TestFlow_InvalidIDToken(t *testing.T) {
-	server, client, _ := newServer(t, "bad-id-token", fakeValidator{wantToken: validIDToken})
-	resp := get(t, client, server.URL+"/auth/test")
-	require.Equal(t, http.StatusFound, resp.StatusCode)
+	server, client, _ := newServer(t, func(string) string { return "bad-id-token" },
+		fakeValidator{err: bearer.ErrUnauthorized})
+	state, code := startLogin(t, client, server, "")
 
-	location, err := url.Parse(resp.Header.Get("Location"))
-	require.NoError(t, err)
-	state := location.Query().Get("state")
-
-	callback := server.URL + "/auth/test/callback?code=auth-code&state=" + url.QueryEscape(state)
-	resp = get(t, client, callback)
+	resp := get(t, client, callbackURL(server, state, code, ""))
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
 func TestFlow_MissingAuthorizationCode(t *testing.T) {
-	server, client, _ := newServer(t, validIDToken, nil)
-	resp := get(t, client, server.URL+"/auth/test")
-	require.Equal(t, http.StatusFound, resp.StatusCode)
+	server, client, _ := newServer(t, nil, nil)
+	state, _ := startLogin(t, client, server, "")
 
-	location, err := url.Parse(resp.Header.Get("Location"))
-	require.NoError(t, err)
-	state := location.Query().Get("state")
-
-	callback := server.URL + "/auth/test/callback?state=" + url.QueryEscape(state)
-	resp = get(t, client, callback)
+	resp := get(t, client, server.URL+"/auth/test/callback?state="+url.QueryEscape(state))
 	assert.Equal(t, http.StatusBadRequest, resp.StatusCode)
 }
 
 func TestFlow_ProviderError(t *testing.T) {
-	server, client, _ := newServer(t, validIDToken, nil)
-	resp := get(t, client, server.URL+"/auth/test")
-	require.Equal(t, http.StatusFound, resp.StatusCode)
+	server, client, _ := newServer(t, nil, nil)
+	state, _ := startLogin(t, client, server, "")
 
-	location, err := url.Parse(resp.Header.Get("Location"))
-	require.NoError(t, err)
-	state := location.Query().Get("state")
-
-	callback := server.URL + "/auth/test/callback?state=" + url.QueryEscape(state) + "&error=access_denied"
-	resp = get(t, client, callback)
+	resp := get(t, client, server.URL+"/auth/test/callback?state="+url.QueryEscape(state)+"&error=access_denied")
 	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
 func TestFlow_ModeToken(t *testing.T) {
-	server, client, serverURL := newServer(t, validIDToken, nil)
+	server, client, serverURL := newServer(t, nil, nil)
 
-	resp := get(t, client, server.URL+"/auth/test")
-	require.Equal(t, http.StatusFound, resp.StatusCode)
-	location, err := url.Parse(resp.Header.Get("Location"))
-	require.NoError(t, err)
-	state := location.Query().Get("state")
-
-	callback := server.URL + "/auth/test/callback?code=auth-code&state=" + url.QueryEscape(state) + "&mode=token"
-	resp = get(t, client, callback)
+	state, code := startLogin(t, client, server, "")
+	resp := get(t, client, callbackURL(server, state, code, "mode=token"))
 	require.Equal(t, http.StatusOK, resp.StatusCode)
-	assert.JSONEq(t, `{"token":"valid-id-token","token_type":"Bearer","expires_in":3600}`,
-		readBody(t, resp))
+
+	var payload struct {
+		Token     string `json:"token"`
+		TokenType string `json:"token_type"`
+		ExpiresIn int    `json:"expires_in"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(readBody(t, resp)), &payload))
+	assert.Equal(t, "Bearer", payload.TokenType)
+	assert.InDelta(t, 3600, payload.ExpiresIn, 30, "expires_in must be the remaining token lifetime")
+	claims := idTokenClaims(t, payload.Token)
+	assert.Equal(t, "someone@example.com", claims["email"])
+	assert.NotEmpty(t, claims["nonce"])
 	assert.Empty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName),
 		"mode=token must not set the session cookie")
 	stateCookie := findCookie(t, resp, stateCookieName)
@@ -267,14 +302,14 @@ func TestFlow_ModeToken(t *testing.T) {
 }
 
 func TestFlow_NextWithPipe(t *testing.T) {
-	server, client, _ := newServer(t, validIDToken, nil)
+	server, client, _ := newServer(t, nil, nil)
 
 	target := completeLogin(t, client, server, "/private?x=a|b")
 	assert.Equal(t, "/private?x=a|b", target, "next containing | must survive the state cookie")
 }
 
 func TestFlow_Pkce(t *testing.T) {
-	server, client, serverURL := newServer(t, validIDToken, nil)
+	server, client, serverURL := newServer(t, nil, nil)
 
 	resp := get(t, client, server.URL+"/auth/test")
 	require.Equal(t, http.StatusFound, resp.StatusCode)
@@ -283,6 +318,7 @@ func TestFlow_Pkce(t *testing.T) {
 	q := location.Query()
 	assert.NotEmpty(t, q.Get("code_challenge"))
 	assert.Equal(t, "S256", q.Get("code_challenge_method"))
+	assert.NotEmpty(t, q.Get("nonce"))
 
 	var req loginRequest
 	raw := sessionCookie(client.Jar, serverURL, stateCookieName)
@@ -292,13 +328,22 @@ func TestFlow_Pkce(t *testing.T) {
 	require.NoError(t, json.Unmarshal(decoded, &req))
 	require.NotEmpty(t, req.Verifier)
 	assert.Equal(t, s256Challenge(req.Verifier), q.Get("code_challenge"))
+	assert.Equal(t, req.Nonce, q.Get("nonce"), "the authorization request must carry the state cookie's nonce")
+}
+
+func TestFlow_NonceMismatch(t *testing.T) {
+	// The provider echoes a nonce that differs from the one we sent.
+	server, client, _ := newServer(t, func(string) string { return signInIDToken(t, "attacker-controlled-nonce") }, nil)
+	state, code := startLogin(t, client, server, "")
+
+	resp := get(t, client, callbackURL(server, state, code, ""))
+	assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
 }
 
 func TestFlow_CookieTtlClampedToTokenExpiry(t *testing.T) {
 	exp := time.Now().Add(90 * time.Second)
-	idToken := idTokenWithExp(t, exp)
-	oauth := newFakeOAuthServer(t, idToken)
-	flow, err := New(Config{Providers: []Provider{provider(oauth, fakeValidator{wantToken: idToken})}})
+	oauth := newFakeOAuthServer(t, func(nonce string) string { return idTokenWithExp(t, exp, nonce) })
+	flow, err := New(Config{Providers: []Provider{provider(oauth, fakeValidator{})}})
 	require.NoError(t, err)
 
 	mux := http.NewServeMux()
@@ -314,21 +359,15 @@ func TestFlow_CookieTtlClampedToTokenExpiry(t *testing.T) {
 		},
 	}
 
-	resp := get(t, client, server.URL+"/auth/test?next=%2F")
-	require.Equal(t, http.StatusFound, resp.StatusCode)
-	location, err := url.Parse(resp.Header.Get("Location"))
-	require.NoError(t, err)
-	state := location.Query().Get("state")
-	require.NotEmpty(t, state)
+	state, code := startLogin(t, client, server, "/")
 
-	callback := server.URL + "/auth/test/callback?code=auth-code&state=" + url.QueryEscape(state)
-	resp = get(t, client, callback)
+	resp := get(t, client, callbackURL(server, state, code, ""))
 	require.Equal(t, http.StatusFound, resp.StatusCode)
 	require.Equal(t, "/", resp.Header.Get("Location"))
 
 	cookie := findCookie(t, resp, bearer.SessionCookieName)
 	require.NotNil(t, cookie)
-	assert.Equal(t, idToken, cookie.Value)
+	require.NotEmpty(t, cookie.Value)
 	assert.GreaterOrEqual(t, cookie.MaxAge, 80)
 	assert.LessOrEqual(t, cookie.MaxAge, 90) // clamped to the ~90s token exp
 }
@@ -344,15 +383,45 @@ func findCookie(t *testing.T, resp *http.Response, name string) *http.Cookie {
 	return nil
 }
 
-func idTokenWithExp(t *testing.T, exp time.Time) string {
+func idTokenWithExp(t *testing.T, exp time.Time, nonce string) string {
+	t.Helper()
+	return idTokenWithPayload(t, fmt.Sprintf(`{"sub":"user-1","exp":%d,"nonce":%q}`, exp.Unix(), nonce))
+}
+
+// signInIDToken builds the token the fake provider hands back on a successful
+// sign-in: a structurally valid JWT carrying the nonce from the authorization
+// request (the signature is not verified by the fake validator).
+func signInIDToken(t *testing.T, nonce string) string {
+	t.Helper()
+	return idTokenWithPayload(t, fmt.Sprintf(
+		`{"sub":"user-1","email":"someone@example.com","exp":%d,"nonce":%q}`,
+		time.Now().Add(time.Hour).Unix(), nonce))
+}
+
+func idTokenWithPayload(t *testing.T, payload string) string {
 	t.Helper()
 	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
-	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"sub":"user-1","exp":%d}`, exp.Unix())))
-	return header + "." + payload + ".sig"
+	body := base64.RawURLEncoding.EncodeToString([]byte(payload))
+	return header + "." + body + ".sig"
+}
+
+// idTokenClaims decodes the (unverified) payload of a JWT produced by the
+// fake provider.
+func idTokenClaims(t *testing.T, token string) map[string]any {
+	t.Helper()
+	parts := strings.Split(token, ".")
+	if len(parts) != 3 {
+		t.Fatalf("not a JWT: %q", token)
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	require.NoError(t, err)
+	var claims map[string]any
+	require.NoError(t, json.Unmarshal(payload, &claims))
+	return claims
 }
 
 func TestFlow_Logout(t *testing.T) {
-	server, client, serverURL := newServer(t, validIDToken, nil)
+	server, client, serverURL := newServer(t, nil, nil)
 	completeLogin(t, client, server, "/")
 
 	assert.NotEmpty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
@@ -367,9 +436,23 @@ func TestFlow_Logout(t *testing.T) {
 	assert.Empty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
 }
 
+func TestFlow_LogoutIgnoresRequestWithoutSessionCookie(t *testing.T) {
+	server, client, serverURL := newServer(t, nil, nil)
+
+	req, err := http.NewRequest(http.MethodPost, server.URL+"/auth/logout", nil)
+	require.NoError(t, err)
+	resp, err := client.Do(req)
+	require.NoError(t, err)
+	resp.Body.Close()
+
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Empty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName),
+		"logout without a session cookie (e.g. cross-site CSRF) must not issue anything")
+}
+
 func TestFlow_Private(t *testing.T) {
-	oauth := newFakeOAuthServer(t, validIDToken)
-	flow, err := New(Config{Providers: []Provider{provider(oauth, fakeValidator{wantToken: validIDToken})}})
+	oauth := newFakeOAuthServer(t, nil)
+	flow, err := New(Config{Providers: []Provider{provider(oauth, fakeValidator{})}})
 	require.NoError(t, err)
 
 	mux := http.NewServeMux()
@@ -380,7 +463,7 @@ func TestFlow_Private(t *testing.T) {
 		_, _ = w.Write([]byte(user.Email))
 	})
 	mux.Handle("/private", bearer.RequireVerifiedEmail(
-		[]bearer.TokenValidator{fakeValidator{wantToken: validIDToken}},
+		[]bearer.TokenValidator{fakeValidator{}},
 	)(protected))
 
 	server := httptest.NewServer(mux)
@@ -398,7 +481,7 @@ func TestFlow_Private(t *testing.T) {
 
 	target := completeLogin(t, client, server, "/private")
 	assert.Equal(t, "/private", target)
-	assert.Equal(t, validIDToken, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
+	assert.NotEmpty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
 
 	resp := get(t, client, server.URL+"/private")
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -406,8 +489,8 @@ func TestFlow_Private(t *testing.T) {
 }
 
 func TestFlow_RequireLogin(t *testing.T) {
-	oauth := newFakeOAuthServer(t, validIDToken)
-	flow, err := New(Config{Providers: []Provider{provider(oauth, fakeValidator{wantToken: validIDToken})}})
+	oauth := newFakeOAuthServer(t, nil)
+	flow, err := New(Config{Providers: []Provider{provider(oauth, fakeValidator{})}})
 	require.NoError(t, err)
 
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -418,7 +501,7 @@ func TestFlow_RequireLogin(t *testing.T) {
 	mux := http.NewServeMux()
 	flow.Register(mux)
 	mux.Handle("/private", flow.RequireLogin(
-		[]bearer.TokenValidator{fakeValidator{wantToken: validIDToken}},
+		[]bearer.TokenValidator{fakeValidator{}},
 	)(protected))
 
 	server := httptest.NewServer(mux)
@@ -458,7 +541,7 @@ func TestFlow_RequireLogin(t *testing.T) {
 	t.Run("passesThroughWithBearer", func(t *testing.T) {
 		req, err := http.NewRequest(http.MethodGet, server.URL+"/private", nil)
 		require.NoError(t, err)
-		req.Header.Set("Authorization", "Bearer "+validIDToken)
+		req.Header.Set("Authorization", "Bearer anything-works-with-the-fake-validator")
 		resp, err := http.DefaultClient.Do(req)
 		require.NoError(t, err)
 		defer resp.Body.Close()
@@ -469,7 +552,7 @@ func TestFlow_RequireLogin(t *testing.T) {
 	t.Run("passesThroughWithCookie", func(t *testing.T) {
 		target := completeLogin(t, client, server, "/private")
 		assert.Equal(t, "/private", target)
-		assert.Equal(t, validIDToken, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
+		assert.NotEmpty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
 
 		resp := get(t, client, server.URL+"/private")
 		require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -478,7 +561,7 @@ func TestFlow_RequireLogin(t *testing.T) {
 }
 
 func TestFlow_UnknownProvider(t *testing.T) {
-	server, client, _ := newServer(t, validIDToken, nil)
+	server, client, _ := newServer(t, nil, nil)
 	resp := get(t, client, server.URL+"/auth/unknown")
 	assert.Equal(t, http.StatusNotFound, resp.StatusCode)
 }
@@ -489,12 +572,12 @@ func TestFlow_RequiresProvider(t *testing.T) {
 }
 
 func TestFlow_DefaultPaths(t *testing.T) {
-	oauth := newFakeOAuthServer(t, validIDToken)
+	oauth := newFakeOAuthServer(t, nil)
 	flow, err := New(Config{Providers: []Provider{{
 		Name:      "demo",
 		ClientID:  "client-id",
 		Endpoint:  oauth2.Endpoint{AuthURL: oauth.URL + "/authorize", TokenURL: oauth.URL + "/token"},
-		Validator: fakeValidator{wantToken: validIDToken},
+		Validator: fakeValidator{},
 	}}})
 	require.NoError(t, err)
 	assert.Equal(t, "/auth/demo", flow.providers["demo"].StartPath)
