@@ -23,17 +23,22 @@ microsoft, err := bearer.NewMicrosoftTokenValidator(tenantId, "microsoft-client-
 
 - `NewGoogleTokenValidator` validates Google ID tokens for the given client ID.
 - `NewMicrosoftTokenValidator(tenantId, clientId)` validates Microsoft Entra ID
-  tokens. Pass a tenant ID (a GUID or verified domain such as
-  `contoso.onmicrosoft.com`) to restrict sign-in to a single tenant, or use a
+  tokens. Pass a tenant ID to restrict sign-in to a single tenant: the tenant
+  GUID is recommended (a verified domain such as `contoso.onmicrosoft.com`
+  also works and is resolved to its GUID during discovery). Or use a
   tenant-independent mode for multi-tenant apps:
   - `"common"` — any organizational directory plus personal Microsoft accounts
   - `"organizations"` — any organizational directory (work/school accounts)
   - `"consumers"` — personal Microsoft accounts only
 
-  Because Entra ID puts the tenant in every token's `iss` claim, multi-tenant
-  modes validate the signature against the tenant-independent keys endpoint and
-  enforce the tenant chain of trust (`tid` claim + matching `iss`) instead of
-  exact-issuer matching.
+  Entra ID puts the actual tenant in every token's `iss` claim (and its
+  metadata sometimes reports the `{tenantid}` placeholder), so exact-issuer
+  matching is unreliable. All modes verify the signature and enforce the tenant
+  chain of trust: a GUID `tid` claim whose issuer is
+  `https://login.microsoftonline.com/{tid}/v2.0`. Single-tenant mode also pins
+  `tid` to the configured tenant, which rejects B2B guest users whose home
+  tenant differs. If a domain cannot be resolved to a GUID (placeholder
+  issuer), construction fails with a hint to configure the GUID explicitly.
 
 Multiple validators can be supplied; they are tried in order until one succeeds.
 
@@ -59,12 +64,13 @@ handler := bearer.Chain(
   from the context and must be placed after `RequireVerifiedEmail`.
 
 Authentication sources, in order of priority:
-1. `Authorization: Bearer <token>` header
+1. `Authorization: Bearer <token>` header (any other scheme is rejected)
 2. the session cookie (`bearer.SessionCookieName`, default `"session"`)
 
-Requests that authenticate via the header also store the raw token in the
-context, retrievable with `MustGetTokenFromCtx`. The authenticated user is
-retrievable with `MustGetUserFromCtx`.
+Authenticated requests also expose the raw credential in the context,
+retrievable with `MustGetTokenFromCtx`. The authenticated user is retrievable
+with `MustGetUserFromCtx`. `RequireMinimumRole` / `RequireWhiteListedEmail`
+reject with 403 (not 401, which is reserved for missing/invalid credentials).
 
 For public pages that show different content (e.g. a user menu) when signed in,
 use `OptionalAuth`, which authenticates when a valid credential is present and
@@ -150,17 +156,20 @@ Routes:
 
 Callbacks also support `?mode=token`, returning
 `{"token": ..., "token_type": "Bearer", "expires_in": ...}` as JSON instead of
-setting a cookie and redirecting. The session cookie is only written in the
-standard (redirect) flow.
+setting a cookie and redirecting. `expires_in` reflects the ID token's
+remaining lifetime (never more than `SessionTTL`). The session cookie is only
+written in the standard (redirect) flow.
 
 Notes:
 
 - Register the callback URL (e.g. `https://example.com/auth/google/callback`)
   in each provider's console. By default the callback URL is derived from the
-  incoming request; override with `Provider.RedirectURL` when you need an exact
-  match.
-- The state is kept in a short-lived, http-only cookie to prevent login CSRF;
-  `next` must be a same-origin path to prevent open redirects.
+  incoming request, honoring `X-Forwarded-Proto` / `X-Forwarded-Host` so TLS
+  termination behind a reverse proxy works; override with `Provider.RedirectURL`
+  when you need an exact match.
+- The OAuth start uses PKCE (S256), and the state cookie — which holds the CSRF
+  state, the same-origin `next` target, and the code verifier — is short-lived
+  and http-only. `next` must be a same-origin path to prevent open redirects.
 - The session cookie holds the provider ID token and is read by
   `RequireVerifiedEmail` via `bearer.SessionCookieName`. Set
   `Config.Secure = true` in production.

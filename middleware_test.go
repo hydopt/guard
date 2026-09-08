@@ -30,6 +30,14 @@ func (m *mockRoleStore) RoleByEmail(ctx context.Context, email string) (string, 
 	return "", nil
 }
 
+type mockIntRoleStore struct {
+	roles map[string]int
+}
+
+func (m *mockIntRoleStore) RoleByEmail(ctx context.Context, email string) (int, error) {
+	return m.roles[email], nil
+}
+
 func TestChainOrder(t *testing.T) {
 	var order []string
 
@@ -140,7 +148,49 @@ func TestRequireWhiteListedEmailRejects(t *testing.T) {
 
 	mw(handler).ServeHTTP(rec, req)
 
+	require.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestRequireVerifiedEmailRejectsNonBearerScheme(t *testing.T) {
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	})
+
+	mw := RequireVerifiedEmail([]TokenValidator{&mockTokenValidator{user: &User{Email: "test@example.com"}}})
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Basic dXNlcjpwYXNz")
+	rec := httptest.NewRecorder()
+
+	mw(handler).ServeHTTP(rec, req)
+
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestRequireMinimumRoleRejectsForbidden(t *testing.T) {
+	user := &User{Email: "user@example.com"}
+	store := &mockIntRoleStore{roles: map[string]int{"user@example.com": 2}}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	})
+
+	mw := Chain(
+		func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				ctx := context.WithValue(r.Context(), userKey, user)
+				next.ServeHTTP(w, r.WithContext(ctx))
+			})
+		},
+		RequireMinimumRole(store, 3),
+	)
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	mw(handler).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusForbidden, rec.Code)
 }
 
 func TestOptionalAuthNoCredentials(t *testing.T) {

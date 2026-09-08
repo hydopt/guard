@@ -11,6 +11,8 @@ var signInFiles embed.FS
 
 var signInPage = mustRead(signInFiles, "sign_in.html")
 
+var signInTemplate = template.Must(template.New("signin").Parse(signInPage))
+
 func mustRead(fs embed.FS, name string) string {
 	b, err := fs.ReadFile(name)
 	if err != nil {
@@ -26,12 +28,11 @@ type Provider struct {
 }
 
 func SignInHandler(providers []Provider) http.Handler {
-	tmpl := template.Must(template.New("signin").Parse(signInPage))
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		data := struct {
 			Providers []Provider
 		}{Providers: providers}
-		if err := tmpl.Execute(w, data); err != nil {
+		if err := signInTemplate.Execute(w, data); err != nil {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 		}
 	})

@@ -67,7 +67,7 @@ func RequireMinimumRole[T cmp.Ordered](store RoleStore[T], minimumRole T) Middle
 				role, err := store.RoleByEmail(r.Context(), user.Email)
 				if err != nil || role < minimumRole {
 					slog.Info("Insufficient privileges", "error", err, "role", role)
-					http.Error(w, "Insufficient privileges", http.StatusUnauthorized)
+					http.Error(w, "Forbidden", http.StatusForbidden)
 					return
 				}
 				next.ServeHTTP(w, r)
@@ -81,7 +81,7 @@ func RequireWhiteListedEmail(whitelist []string) Middleware {
 			func(w http.ResponseWriter, r *http.Request) {
 				user := MustGetUserFromCtx(r.Context())
 				if !slices.Contains(whitelist, user.Email) {
-					http.Error(w, "Email not in whitelist", http.StatusUnauthorized)
+					http.Error(w, "Forbidden", http.StatusForbidden)
 					return
 				}
 				next.ServeHTTP(w, r)

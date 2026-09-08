@@ -2,6 +2,7 @@ package signin
 
 import (
 	"crypto/rand"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"log/slog"
@@ -78,9 +79,19 @@ func (f *Flow) handleStart(p *Provider) http.HandlerFunc {
 			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
+		verifier, err := newState()
+		if err != nil {
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
+			return
+		}
 		next := safeRedirect(r.URL.Query().Get("next"), f.homePath)
-		f.writeStateCookie(w, state+"|"+next)
-		http.Redirect(w, r, f.oauthConfig(p, r).AuthCodeURL(state, oauth2.AccessTypeOnline), http.StatusFound)
+		f.writeStateCookie(w, loginRequest{State: state, Next: next, Verifier: verifier})
+		http.Redirect(w, r, f.oauthConfig(p, r).AuthCodeURL(
+			state,
+			oauth2.AccessTypeOnline,
+			oauth2.SetAuthURLParam("code_challenge", s256Challenge(verifier)),
+			oauth2.SetAuthURLParam("code_challenge_method", "S256"),
+		), http.StatusFound)
 	}
 }
 
@@ -97,8 +108,13 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 			http.Error(w, "Invalid state", http.StatusUnauthorized)
 			return
 		}
-		state, next, found := strings.Cut(stateCookie.Value, "|")
-		if !found || state == "" || state != r.URL.Query().Get("state") {
+		decoded, err := base64.RawURLEncoding.DecodeString(stateCookie.Value)
+		if err != nil {
+			http.Error(w, "Invalid state", http.StatusUnauthorized)
+			return
+		}
+		var req loginRequest
+		if err := json.Unmarshal(decoded, &req); err != nil || req.State == "" || req.State != r.URL.Query().Get("state") {
 			http.Error(w, "Invalid state", http.StatusUnauthorized)
 			return
 		}
@@ -110,7 +126,7 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 			return
 		}
 
-		token, err := f.oauthConfig(p, r).Exchange(r.Context(), code)
+		token, err := f.oauthConfig(p, r).Exchange(r.Context(), code, oauth2.SetAuthURLParam("code_verifier", req.Verifier))
 		if err != nil {
 			slog.Info("token exchange failed", "provider", p.Name, "error", err)
 			http.Error(w, "Token exchange failed", http.StatusUnauthorized)
@@ -134,8 +150,22 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 		}
 
 		f.writeSessionCookie(w, idToken, sessionCookieTTL(f.sessionTTL, idToken))
-		http.Redirect(w, r, next, http.StatusFound)
+		http.Redirect(w, r, req.Next, http.StatusFound)
 	}
+}
+
+// loginRequest is what the state cookie holds across the OAuth round trip:
+// the CSRF state, the safe same-origin return target, and the PKCE code
+// verifier. JSON keeps any character safe in the cookie value.
+type loginRequest struct {
+	State    string `json:"state"`
+	Next     string `json:"next,omitempty"`
+	Verifier string `json:"verifier,omitempty"`
+}
+
+func s256Challenge(verifier string) string {
+	sum := sha256.Sum256([]byte(verifier))
+	return base64.RawURLEncoding.EncodeToString(sum[:])
 }
 
 func (f *Flow) handleLogout(w http.ResponseWriter, r *http.Request) {
@@ -147,10 +177,13 @@ func (f *Flow) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, f.homePath, http.StatusFound)
 }
 
-func writeTokenResponse(w http.ResponseWriter, token string, ttl time.Duration) {
+// writeTokenResponse reports the token together with its remaining lifetime
+// (clamped like the session cookie: at most sessionTTL, never beyond exp).
+func writeTokenResponse(w http.ResponseWriter, idToken string, sessionTTL time.Duration) {
+	ttl := sessionCookieTTL(sessionTTL, idToken)
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"token":      token,
+		"token":      idToken,
 		"token_type": "Bearer",
 		"expires_in": int(ttl.Seconds()),
 	})
@@ -174,11 +207,32 @@ func safeRedirect(target, fallback string) string {
 	return target
 }
 
+// redirectURL builds the absolute callback URL. Scheme and host come from the
+// request, honoring the forwarded headers set by TLS-terminating proxies. The
+// forwarded values only shape the redirect_uri sent to the authorization
+// server, which validates it against the registered callback, so a spoofed
+// header cannot be abused.
 func redirectURL(r *http.Request, path string) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
 	}
-	u := url.URL{Scheme: scheme, Host: r.Host, Path: path}
+	if fwd := firstHeaderValue(r.Header.Get("X-Forwarded-Proto")); fwd != "" {
+		scheme = fwd
+	}
+
+	host := r.Host
+	if fwd := firstHeaderValue(r.Header.Get("X-Forwarded-Host")); fwd != "" {
+		host = fwd
+	}
+
+	u := url.URL{Scheme: scheme, Host: host, Path: path}
 	return u.String()
+}
+
+func firstHeaderValue(v string) string {
+	if v == "" {
+		return ""
+	}
+	return strings.TrimSpace(strings.Split(v, ",")[0])
 }

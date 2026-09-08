@@ -19,8 +19,6 @@ const (
 type Config struct {
 	Providers []Provider
 
-	// CookieName is the session cookie name. Defaults to bearer.SessionCookieName.
-	CookieName string
 	// SessionTTL is the session cookie Max-Age. Defaults to one hour.
 	SessionTTL time.Duration
 	// Secure marks session and state cookies Secure. Defaults to false (set to
@@ -50,14 +48,11 @@ func New(cfg Config) (*Flow, error) {
 
 	f := &Flow{
 		providers:  make(map[string]*Provider, len(cfg.Providers)),
-		cookieName: cfg.CookieName,
+		cookieName: bearer.SessionCookieName,
 		sessionTTL: cfg.SessionTTL,
 		secure:     cfg.Secure,
 		homePath:   cfg.HomePath,
 		signInPath: cfg.SignInPath,
-	}
-	if f.cookieName == "" {
-		f.cookieName = bearer.SessionCookieName
 	}
 	if f.sessionTTL <= 0 {
 		f.sessionTTL = defaultSessionTTL

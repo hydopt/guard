@@ -23,8 +23,13 @@ func (f *Flow) clearSessionCookie(w http.ResponseWriter) {
 	f.writeCookie(w, cookieOptions{name: f.cookieName, clear: true})
 }
 
-func (f *Flow) writeStateCookie(w http.ResponseWriter, value string) {
-	f.writeCookie(w, cookieOptions{name: stateCookieName, value: value, ttl: stateTTL})
+func (f *Flow) writeStateCookie(w http.ResponseWriter, req loginRequest) {
+	b, err := json.Marshal(req)
+	if err != nil {
+		panic(err) // loginRequest holds only JSON-safe fields
+	}
+	// base64url keeps the value within the bytes a browser will echo back.
+	f.writeCookie(w, cookieOptions{name: stateCookieName, value: base64.RawURLEncoding.EncodeToString(b), ttl: stateTTL})
 }
 
 func (f *Flow) clearStateCookie(w http.ResponseWriter) {

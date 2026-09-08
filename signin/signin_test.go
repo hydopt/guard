@@ -64,6 +64,10 @@ func newFakeOAuthServer(t *testing.T, idToken string) *httptest.Server {
 			http.Error(w, "bad code", http.StatusBadRequest)
 			return
 		}
+		if r.Form.Get("code_verifier") == "" {
+			http.Error(w, "missing code_verifier", http.StatusBadRequest)
+			return
+		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(map[string]any{
 			"access_token": "access-token",
@@ -260,6 +264,34 @@ func TestFlow_ModeToken(t *testing.T) {
 	require.NotNil(t, stateCookie, "state cookie must be cleared")
 	assert.Equal(t, "", stateCookie.Value)
 	assert.LessOrEqual(t, stateCookie.MaxAge, 0)
+}
+
+func TestFlow_NextWithPipe(t *testing.T) {
+	server, client, _ := newServer(t, validIDToken, nil)
+
+	target := completeLogin(t, client, server, "/private?x=a|b")
+	assert.Equal(t, "/private?x=a|b", target, "next containing | must survive the state cookie")
+}
+
+func TestFlow_Pkce(t *testing.T) {
+	server, client, serverURL := newServer(t, validIDToken, nil)
+
+	resp := get(t, client, server.URL+"/auth/test")
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	location, err := url.Parse(resp.Header.Get("Location"))
+	require.NoError(t, err)
+	q := location.Query()
+	assert.NotEmpty(t, q.Get("code_challenge"))
+	assert.Equal(t, "S256", q.Get("code_challenge_method"))
+
+	var req loginRequest
+	raw := sessionCookie(client.Jar, serverURL, stateCookieName)
+	require.NotEmpty(t, raw)
+	decoded, err := base64.RawURLEncoding.DecodeString(raw)
+	require.NoError(t, err)
+	require.NoError(t, json.Unmarshal(decoded, &req))
+	require.NotEmpty(t, req.Verifier)
+	assert.Equal(t, s256Challenge(req.Verifier), q.Get("code_challenge"))
 }
 
 func TestFlow_CookieTtlClampedToTokenExpiry(t *testing.T) {

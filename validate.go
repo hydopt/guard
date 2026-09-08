@@ -23,15 +23,22 @@ type User struct {
 	Sub           string `json:"sub"`
 }
 
+// getAuthToken returns the bearer credential from the Authorization header
+// (Bearer scheme, case-insensitive per RFC 6750) or the session cookie,
+// whichever is present. A non-Bearer Authorization header is treated as an
+// error, not silently ignored.
 func getAuthToken(r *http.Request) (string, error) {
 	auth := r.Header.Get("Authorization")
 	if auth != "" {
-		return strings.TrimPrefix(auth, "Bearer "), nil
+		if len(auth) <= len("Bearer ") || !strings.EqualFold(auth[:len("Bearer ")], "Bearer ") {
+			return "", errors.New("unsupported authorization scheme")
+		}
+		return strings.TrimSpace(auth[len("Bearer "):]), nil
 	}
 
 	c, err := r.Cookie(SessionCookieName)
 	if err != nil {
-		slog.Info("Could not find cookie", "error", err)
+		slog.Debug("no session cookie", "error", err)
 		return "", err
 	}
 	return c.Value, nil
