@@ -1,7 +1,10 @@
 package signin
 
 import (
+	"encoding/base64"
+	"encoding/json"
 	"net/http"
+	"strings"
 	"time"
 )
 
@@ -12,8 +15,8 @@ type cookieOptions struct {
 	clear bool
 }
 
-func (f *Flow) writeSessionCookie(w http.ResponseWriter, token string) {
-	f.writeCookie(w, cookieOptions{name: f.cookieName, value: token, ttl: f.sessionTTL})
+func (f *Flow) writeSessionCookie(w http.ResponseWriter, token string, ttl time.Duration) {
+	f.writeCookie(w, cookieOptions{name: f.cookieName, value: token, ttl: ttl})
 }
 
 func (f *Flow) clearSessionCookie(w http.ResponseWriter) {
@@ -48,10 +51,52 @@ func (f *Flow) writeCookie(w http.ResponseWriter, o cookieOptions) {
 // SetSessionCookie stores token as the session cookie, authenticating
 // subsequent requests for middlewares built on bearer.SessionCookieName.
 func (f *Flow) SetSessionCookie(w http.ResponseWriter, token string) {
-	f.writeSessionCookie(w, token)
+	f.writeSessionCookie(w, token, f.sessionTTL)
 }
 
 // ClearSessionCookie removes the session cookie.
 func (f *Flow) ClearSessionCookie(w http.ResponseWriter) {
 	f.clearSessionCookie(w)
+}
+
+// sessionCookieTTL clamps the configured session TTL so the cookie never
+// outlives the ID token it stores. Fallback to sessionTTL if the token's exp
+// cannot be read.
+func sessionCookieTTL(sessionTTL time.Duration, idToken string) time.Duration {
+	exp, ok := idTokenExpiry(idToken)
+	if !ok {
+		return sessionTTL
+	}
+	remaining := time.Until(exp)
+	if remaining <= 0 {
+		return sessionTTL
+	}
+	if remaining < sessionTTL {
+		return remaining
+	}
+	return sessionTTL
+}
+
+// idTokenExpiry reads the "exp" claim from an unverified JWT. Safe to inspect
+// without verification: the token is validated separately before it reaches
+// the cookie.
+func idTokenExpiry(idToken string) (time.Time, bool) {
+	parts := strings.Split(idToken, ".")
+	if len(parts) != 3 {
+		return time.Time{}, false
+	}
+	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+	if err != nil {
+		return time.Time{}, false
+	}
+	var claims struct {
+		Exp int64 `json:"exp"`
+	}
+	if err := json.Unmarshal(payload, &claims); err != nil {
+		return time.Time{}, false
+	}
+	if claims.Exp == 0 {
+		return time.Time{}, false
+	}
+	return time.Unix(claims.Exp, 0), true
 }

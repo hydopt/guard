@@ -150,7 +150,8 @@ Routes:
 
 Callbacks also support `?mode=token`, returning
 `{"token": ..., "token_type": "Bearer", "expires_in": ...}` as JSON instead of
-setting a cookie and redirecting.
+setting a cookie and redirecting. The session cookie is only written in the
+standard (redirect) flow.
 
 Notes:
 
@@ -160,9 +161,11 @@ Notes:
   match.
 - The state is kept in a short-lived, http-only cookie to prevent login CSRF;
   `next` must be a same-origin path to prevent open redirects.
-- The session cookie holds the provider ID token (life ≈ 1 hour, matching the
-  default `SessionTTL`) and is read by `RequireVerifiedEmail` via
-  `bearer.SessionCookieName`. Set `Config.Secure = true` in production.
+- The session cookie holds the provider ID token and is read by
+  `RequireVerifiedEmail` via `bearer.SessionCookieName`. Set
+  `Config.Secure = true` in production.
+- The cookie never outlives the ID token it stores: its `Max-Age` is clamped to
+  the token's `exp` claim (at most `SessionTTL`).
 - There is no refresh-token plumbing: sessions last as long as the ID token
   (≈ 1 hour by default, tune `SessionTTL` down but not beyond the token's
   expiry) and then the user signs in again. This keeps the design stateless

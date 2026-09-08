@@ -128,12 +128,12 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 			return
 		}
 
-		f.writeSessionCookie(w, idToken)
-
 		if r.URL.Query().Get("mode") == "token" {
 			writeTokenResponse(w, idToken, f.sessionTTL)
 			return
 		}
+
+		f.writeSessionCookie(w, idToken, sessionCookieTTL(f.sessionTTL, idToken))
 		http.Redirect(w, r, next, http.StatusFound)
 	}
 }

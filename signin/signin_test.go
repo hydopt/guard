@@ -2,7 +2,9 @@ package signin
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/cookiejar"
@@ -239,7 +241,7 @@ func TestFlow_ProviderError(t *testing.T) {
 }
 
 func TestFlow_ModeToken(t *testing.T) {
-	server, client, _ := newServer(t, validIDToken, nil)
+	server, client, serverURL := newServer(t, validIDToken, nil)
 
 	resp := get(t, client, server.URL+"/auth/test")
 	require.Equal(t, http.StatusFound, resp.StatusCode)
@@ -252,6 +254,69 @@ func TestFlow_ModeToken(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.JSONEq(t, `{"token":"valid-id-token","token_type":"Bearer","expires_in":3600}`,
 		readBody(t, resp))
+	assert.Empty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName),
+		"mode=token must not set the session cookie")
+	stateCookie := findCookie(t, resp, stateCookieName)
+	require.NotNil(t, stateCookie, "state cookie must be cleared")
+	assert.Equal(t, "", stateCookie.Value)
+	assert.LessOrEqual(t, stateCookie.MaxAge, 0)
+}
+
+func TestFlow_CookieTtlClampedToTokenExpiry(t *testing.T) {
+	exp := time.Now().Add(90 * time.Second)
+	idToken := idTokenWithExp(t, exp)
+	oauth := newFakeOAuthServer(t, idToken)
+	flow, err := New(Config{Providers: []Provider{provider(oauth, fakeValidator{wantToken: idToken})}})
+	require.NoError(t, err)
+
+	mux := http.NewServeMux()
+	flow.Register(mux)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	resp := get(t, client, server.URL+"/auth/test?next=%2F")
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	location, err := url.Parse(resp.Header.Get("Location"))
+	require.NoError(t, err)
+	state := location.Query().Get("state")
+	require.NotEmpty(t, state)
+
+	callback := server.URL + "/auth/test/callback?code=auth-code&state=" + url.QueryEscape(state)
+	resp = get(t, client, callback)
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	require.Equal(t, "/", resp.Header.Get("Location"))
+
+	cookie := findCookie(t, resp, bearer.SessionCookieName)
+	require.NotNil(t, cookie)
+	assert.Equal(t, idToken, cookie.Value)
+	assert.GreaterOrEqual(t, cookie.MaxAge, 80)
+	assert.LessOrEqual(t, cookie.MaxAge, 90) // clamped to the ~90s token exp
+}
+
+func findCookie(t *testing.T, resp *http.Response, name string) *http.Cookie {
+	t.Helper()
+	for _, raw := range resp.Header.Values("Set-Cookie") {
+		c, err := http.ParseSetCookie(raw)
+		if err == nil && c.Name == name {
+			return c
+		}
+	}
+	return nil
+}
+
+func idTokenWithExp(t *testing.T, exp time.Time) string {
+	t.Helper()
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none","typ":"JWT"}`))
+	payload := base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(`{"sub":"user-1","exp":%d}`, exp.Unix())))
+	return header + "." + payload + ".sig"
 }
 
 func TestFlow_Logout(t *testing.T) {
