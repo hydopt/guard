@@ -18,14 +18,14 @@ type MicrosoftTokenValidator struct {
 // NewMicrosoftTokenValidator creates a validator for Microsoft Entra ID (Azure AD)
 // ID tokens. Pass tenantId "common" to accept users from any Entra ID tenant
 // (multi-tenant), or a specific tenant ID to restrict to a single tenant.
-func NewMicrosoftTokenValidator(tenantId, clientId string) *MicrosoftTokenValidator {
+func NewMicrosoftTokenValidator(tenantId, clientId string) (*MicrosoftTokenValidator, error) {
 	issuer := "https://login.microsoftonline.com/" + tenantId + "/v2.0"
 	provider, err := oidc.NewProvider(context.Background(), issuer)
 	if err != nil {
-		panic(fmt.Sprintf("failed to create microsoft token provider: %v", err))
+		return nil, fmt.Errorf("failed to create microsoft token provider: %w", err)
 	}
 	verifier := provider.Verifier(&oidc.Config{ClientID: clientId})
-	return &MicrosoftTokenValidator{ClientId: clientId, Verifier: verifier}
+	return &MicrosoftTokenValidator{ClientId: clientId, Verifier: verifier}, nil
 }
 
 type microsoftClaims struct {

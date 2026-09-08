@@ -12,8 +12,8 @@ type Middleware func(http.Handler) http.Handler
 
 func Chain(ms ...Middleware) Middleware {
 	return func(next http.Handler) http.Handler {
-		for i := len(ms) - 1; i >= 0; i-- {
-			next = ms[i](next)
+		for _, m := range slices.Backward(ms) {
+			next = m(next)
 		}
 		return next
 	}
@@ -22,24 +22,38 @@ func Chain(ms ...Middleware) Middleware {
 type userCtxKey string
 
 const userKey userCtxKey = "user"
+const tokenKey userCtxKey = "token"
 
-func mustGetUserFromCtx(ctx context.Context) *User {
+func MustGetUserFromCtx(ctx context.Context) *User {
 	user, ok := ctx.Value(userKey).(*User)
 	Assert(ok, "user must be part of context")
 	return user
+}
+
+func MustGetTokenFromCtx(ctx context.Context) string {
+	token, ok := ctx.Value(tokenKey).(string)
+	Assert(ok, "token should be part of context")
+	return token
 }
 
 func RequireVerifiedEmail(validators []TokenValidator) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
-				user, err := authenticateUser(r, validators)
+				token, err := getAuthToken(r)
+				if err != nil {
+					http.Error(w, "Not authorized", http.StatusUnauthorized)
+					return
+				}
+
+				user, err := authenticateUser(r.Context(), token, validators)
 				if err != nil {
 					http.Error(w, "Not authorized", http.StatusUnauthorized)
 					return
 				}
 
 				ctx := context.WithValue(r.Context(), userKey, user)
+				ctx = context.WithValue(ctx, tokenKey, token)
 				next.ServeHTTP(w, r.WithContext(ctx))
 			})
 	}
@@ -49,7 +63,7 @@ func RequireMinimumRole[T cmp.Ordered](store RoleStore[T], minimumRole T) Middle
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
-				user := mustGetUserFromCtx(r.Context())
+				user := MustGetUserFromCtx(r.Context())
 				role, err := store.RoleByEmail(r.Context(), user.Email)
 				if err != nil || role < minimumRole {
 					slog.Info("Insufficient privileges", "error", err, "role", role)
@@ -65,7 +79,7 @@ func RequireWhiteListedEmail(whitelist []string) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
-				user := mustGetUserFromCtx(r.Context())
+				user := MustGetUserFromCtx(r.Context())
 				if !slices.Contains(whitelist, user.Email) {
 					http.Error(w, "Email not in whitelist", http.StatusUnauthorized)
 					return

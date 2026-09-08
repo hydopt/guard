@@ -3,12 +3,14 @@ package bearer
 import (
 	"context"
 	"errors"
-	"fmt"
+	"log/slog"
 	"net/http"
 	"strings"
 )
 
 var ErrUnauthorized = errors.New("unauthorized")
+
+const SessionCookieName = "session"
 
 type TokenValidator interface {
 	ValidateToken(ctx context.Context, token string) (*User, error)
@@ -21,15 +23,23 @@ type User struct {
 	Sub           string `json:"sub"`
 }
 
-func authenticateUser(r *http.Request, validators []TokenValidator) (*User, error) {
+func getAuthToken(r *http.Request) (string, error) {
 	auth := r.Header.Get("Authorization")
-	token := strings.TrimPrefix(auth, "Bearer ")
-	if token == auth {
-		return nil, fmt.Errorf("missing bearer token: %w", ErrUnauthorized)
+	if auth != "" {
+		return strings.TrimPrefix(auth, "Bearer "), nil
 	}
 
+	c, err := r.Cookie(SessionCookieName)
+	if err != nil {
+		slog.Info("Could not find cookie", "error", err)
+		return "", err
+	}
+	return c.Value, nil
+}
+
+func authenticateUser(ctx context.Context, token string, validators []TokenValidator) (*User, error) {
 	for _, validator := range validators {
-		if user, err := validator.ValidateToken(r.Context(), token); err == nil {
+		if user, err := validator.ValidateToken(ctx, token); err == nil {
 			return user, err
 		}
 	}

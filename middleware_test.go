@@ -99,7 +99,7 @@ func TestRequireVerifiedEmailShortCircuits(t *testing.T) {
 func TestRequireVerifiedEmailSetsUser(t *testing.T) {
 	var gotUser *User
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotUser = mustGetUserFromCtx(r.Context())
+		gotUser = MustGetUserFromCtx(r.Context())
 		w.WriteHeader(http.StatusOK)
 	})
 
@@ -141,6 +141,68 @@ func TestRequireWhiteListedEmailRejects(t *testing.T) {
 	mw(handler).ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestOptionalAuthNoCredentials(t *testing.T) {
+	called := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		user, ok := GetUserFromCtx(r.Context())
+		assert.Nil(t, user)
+		assert.False(t, ok)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := OptionalAuth([]TokenValidator{&mockTokenValidator{err: ErrUnauthorized}})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+
+	mw(handler).ServeHTTP(rec, req)
+
+	require.True(t, called)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestOptionalAuthWithValidCredential(t *testing.T) {
+	user := &User{Email: "test@example.com"}
+	var gotToken string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		got, ok := GetUserFromCtx(r.Context())
+		require.True(t, ok)
+		require.Equal(t, "test@example.com", got.Email)
+		gotToken = MustGetTokenFromCtx(r.Context())
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := OptionalAuth([]TokenValidator{&mockTokenValidator{user: user}})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	rec := httptest.NewRecorder()
+
+	mw(handler).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Equal(t, "valid-token", gotToken)
+}
+
+func TestOptionalAuthInvalidCredentialPassesThrough(t *testing.T) {
+	called := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		_, ok := GetUserFromCtx(r.Context())
+		assert.False(t, ok)
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := OptionalAuth([]TokenValidator{&mockTokenValidator{err: ErrUnauthorized}})
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer invalid-token")
+	rec := httptest.NewRecorder()
+
+	mw(handler).ServeHTTP(rec, req)
+
+	require.True(t, called)
+	require.Equal(t, http.StatusOK, rec.Code)
 }
 
 func TestChainWithAuthAndWhitelist(t *testing.T) {
