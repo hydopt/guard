@@ -523,6 +523,12 @@ func TestFlow_RequireLogin(t *testing.T) {
 		assert.Equal(t, "/signin?next=%2Fprivate", resp.Header.Get("Location"))
 	})
 
+	t.Run("signInPageForwardsNext", func(t *testing.T) {
+		resp := get(t, client, server.URL+"/signin?next=%2Fprivate")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Contains(t, readBody(t, resp), `href="/auth/test?next=%2Fprivate"`)
+	})
+
 	t.Run("preservesQueryString", func(t *testing.T) {
 		resp := get(t, client, server.URL+"/private?tab=2")
 		require.Equal(t, http.StatusFound, resp.StatusCode)
