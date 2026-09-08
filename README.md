@@ -23,8 +23,17 @@ microsoft, err := bearer.NewMicrosoftTokenValidator(tenantId, "microsoft-client-
 
 - `NewGoogleTokenValidator` validates Google ID tokens for the given client ID.
 - `NewMicrosoftTokenValidator(tenantId, clientId)` validates Microsoft Entra ID
-  tokens. Use `"common"` as `tenantId` to accept users from any Entra ID tenant
-  (multi-tenant), or a specific tenant ID to restrict to a single tenant.
+  tokens. Pass a tenant ID (a GUID or verified domain such as
+  `contoso.onmicrosoft.com`) to restrict sign-in to a single tenant, or use a
+  tenant-independent mode for multi-tenant apps:
+  - `"common"` — any organizational directory plus personal Microsoft accounts
+  - `"organizations"` — any organizational directory (work/school accounts)
+  - `"consumers"` — personal Microsoft accounts only
+
+  Because Entra ID puts the tenant in every token's `iss` claim, multi-tenant
+  modes validate the signature against the tenant-independent keys endpoint and
+  enforce the tenant chain of trust (`tid` claim + matching `iss`) instead of
+  exact-issuer matching.
 
 Multiple validators can be supplied; they are tried in order until one succeeds.
 
