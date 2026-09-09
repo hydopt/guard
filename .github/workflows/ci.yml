@@ -27,7 +27,17 @@ jobs:
           go-version: "1.27"
       - name: Install hurl
         run: |
-          curl --proto '=https' --tlsv1.2 -sSfL https://sh.install.hurl.dev | bash
+          set -euo pipefail
+          VERSION=8.0.1
+          BASE=https://github.com/Orange-OpenSource/hurl/releases/download/$VERSION
+          TARBALL=hurl-$VERSION-x86_64-unknown-linux-gnu.tar.gz
+          curl --proto '=https' --tlsv1.2 -sSfL "$BASE/$TARBALL" -o "/tmp/$TARBALL"
+          curl --proto '=https' --tlsv1.2 -sSfL "$BASE/$TARBALL.sha256" -o "/tmp/$TARBALL.sha256"
+          echo "$(cat /tmp/$TARBALL.sha256)  /tmp/$TARBALL" | sha256sum -c -
+          mkdir -p "$HOME/.local/bin"
+          tar -xzf "/tmp/$TARBALL" -C /tmp
+          install -m 0755 "/tmp/hurl-$VERSION-x86_64-unknown-linux-gnu/bin/hurl" "$HOME/.local/bin/hurl"
+          hurl --version
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run example integration tests
         run: make -C example/basic-auth test
