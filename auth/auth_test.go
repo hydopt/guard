@@ -207,6 +207,58 @@ func TestSetupSessionKeyFromEnv(t *testing.T) {
 	})
 }
 
+func TestSetupRolesFromEnv(t *testing.T) {
+	t.Setenv(EnvOrigin, testOrigin)
+	t.Setenv(guard.EnvRoles, "alice@example.com;admin;user\nbob@example.com;user")
+
+	mux := http.NewServeMux()
+	a, err := Setup(mux)
+	require.NoError(t, err)
+
+	for _, tt := range []struct {
+		email string
+		roles []string
+	}{
+		{email: "alice@example.com", roles: []string{"admin", "user"}},
+		{email: "bob@example.com", roles: []string{"user"}},
+		{email: "unknown@example.com", roles: nil},
+	} {
+		token, err := a.Issuer.SignToken(tt.email, time.Hour)
+		require.NoError(t, err)
+		user, err := a.Issuer.ValidateToken(t.Context(), token)
+		require.NoError(t, err)
+		assert.Equal(t, tt.roles, user.Roles, "roles claim for %s", tt.email)
+	}
+}
+
+func TestSetupRolesFromEnvBadLine(t *testing.T) {
+	t.Setenv(EnvOrigin, testOrigin)
+	t.Setenv(guard.EnvRoles, "alice@example.com;admin\nbob@example.com")
+
+	mux := http.NewServeMux()
+	_, err := Setup(mux)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "GUARD_ROLES")
+}
+
+func TestSetupOptionsOverrideEnvRoles(t *testing.T) {
+	t.Setenv(EnvOrigin, testOrigin)
+	t.Setenv(guard.EnvRoles, "alice@example.com;env")
+
+	explicit := guard.InMemoryRoleStore{
+		"alice@example.com": {"explicit"},
+	}
+	mux := http.NewServeMux()
+	a, err := Setup(mux, WithRoleStore(explicit))
+	require.NoError(t, err)
+
+	token, err := a.Issuer.SignToken("alice@example.com", time.Hour)
+	require.NoError(t, err)
+	user, err := a.Issuer.ValidateToken(t.Context(), token)
+	require.NoError(t, err)
+	assert.Equal(t, []string{"explicit"}, user.Roles, "the explicit role store must win over "+guard.EnvRoles)
+}
+
 func TestSetupOptionsOverrideEnv(t *testing.T) {
 	t.Setenv(EnvOrigin, "https://env.example.test")
 	t.Setenv(EnvSessionKey, string(testSessionKeyPEM(t)))

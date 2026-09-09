@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"log/slog"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -167,10 +168,12 @@ func WithValidator(name string, v guard.TokenValidator) Option {
 // returning the flow and validators for the auth middlewares.
 //
 // Configuration falls back to environment variables when the corresponding
-// option is not given (GUARD_ORIGIN, GUARD_SESSION_KEY, GOOGLE_CLIENT_ID,
-// GOOGLE_CLIENT_SECRET, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
+// option is not given (GUARD_ORIGIN, GUARD_SESSION_KEY, GUARD_ROLES,
+// GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
 // AZURE_TENANT_ID); explicit options always win. GUARD_ORIGIN (or auth.Issuer)
-// is required.
+// is required. When GUARD_ROLES is set (and no WithRoleStore is given), role
+// assignments are read from it as "<email>;<role1>;<role2>;..." per line and
+// end up as claims on every minted token.
 func Setup(mux *http.ServeMux, opts ...Option) (*Auth, error) {
 	cfg := config{
 		validators: make(map[string]guard.TokenValidator),
@@ -227,6 +230,11 @@ func Setup(mux *http.ServeMux, opts ...Option) (*Auth, error) {
 	}
 	if cfg.tenant == "" {
 		cfg.tenant = defaultTenant
+	}
+	if cfg.roleStore == nil && os.Getenv(guard.EnvRoles) != "" {
+		if cfg.roleStore, err = guard.NewEnvRoleStore(); err != nil {
+			return nil, fmt.Errorf("auth: %s: %w", guard.EnvRoles, err)
+		}
 	}
 
 	issuerCfg := guard.IssuerConfig{Issuer: cfg.issuerOrigin, RoleStore: cfg.roleStore}
