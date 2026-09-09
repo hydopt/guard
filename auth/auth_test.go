@@ -2,9 +2,16 @@ package auth
 
 import (
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
+	"crypto/x509"
+	"encoding/pem"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -147,6 +154,98 @@ func TestSetupSecretsFromEnv(t *testing.T) {
 	assert.Equal(t, "google-secret", google.ClientSecret)
 	ms, _ := a.Flow.Provider(microsoftProvider)
 	assert.Equal(t, "azure-secret", ms.ClientSecret)
+}
+
+func TestSetupFromEnvZeroConfig(t *testing.T) {
+	t.Setenv(EnvOrigin, "https://env.example.test")
+	t.Setenv(EnvGoogleClientID, "google-env")
+	t.Setenv(EnvGoogleSecret, "google-env-secret")
+	t.Setenv(EnvMicrosoftClientID, "ms-env")
+	t.Setenv(EnvMicrosoftSecret, "ms-env-secret")
+	t.Setenv(EnvMicrosoftTenant, "contoso.onmicrosoft.com")
+
+	mux := http.NewServeMux()
+	a, err := Setup(mux)
+	require.NoError(t, err, "Setup(mux) alone must work once environment is configured")
+
+	assert.Equal(t, "https://env.example.test", a.Issuer.IssuerURL())
+	require.NotNil(t, a.Flow)
+
+	google, ok := a.Flow.Provider(googleProvider)
+	require.True(t, ok)
+	assert.Equal(t, "google-env", google.ClientID)
+	assert.Equal(t, "google-env-secret", google.ClientSecret)
+
+	ms, ok := a.Flow.Provider(microsoftProvider)
+	require.True(t, ok)
+	assert.Equal(t, "ms-env", ms.ClientID)
+	assert.Equal(t, "ms-env-secret", ms.ClientSecret)
+	assert.Equal(t, endpoints.AzureAD("contoso.onmicrosoft.com"), ms.Endpoint)
+}
+
+func TestSetupSessionKeyFromEnv(t *testing.T) {
+	pemBytes := testSessionKeyPEM(t)
+
+	t.Run("literal", func(t *testing.T) {
+		t.Setenv(EnvOrigin, testOrigin)
+		t.Setenv(EnvSessionKey, string(pemBytes))
+		mux := http.NewServeMux()
+		a, err := Setup(mux)
+		require.NoError(t, err)
+		signAndVerify(t, a)
+	})
+
+	t.Run("filePath", func(t *testing.T) {
+		path := filepath.Join(t.TempDir(), "session-key.pem")
+		require.NoError(t, os.WriteFile(path, append(pemBytes, '\n'), 0o600))
+		t.Setenv(EnvOrigin, testOrigin)
+		t.Setenv(EnvSessionKey, path)
+		mux := http.NewServeMux()
+		a, err := Setup(mux)
+		require.NoError(t, err)
+		signAndVerify(t, a)
+	})
+}
+
+func TestSetupOptionsOverrideEnv(t *testing.T) {
+	t.Setenv(EnvOrigin, "https://env.example.test")
+	t.Setenv(EnvSessionKey, string(testSessionKeyPEM(t)))
+	t.Setenv(EnvGoogleClientID, "google-env")
+	t.Setenv(EnvGoogleSecret, "google-env-secret")
+	t.Setenv(EnvMicrosoftTenant, "contoso.onmicrosoft.com")
+
+	mux := http.NewServeMux()
+	a, err := Setup(mux,
+		Issuer(testOrigin),
+		Google("google-option"),
+		WithGoogleSecret("google-option-secret"),
+		WithValidator(googleProvider, fakeValidator{}),
+	)
+	require.NoError(t, err)
+
+	assert.Equal(t, testOrigin, a.Issuer.IssuerURL(), "the option must win over "+EnvOrigin)
+	google, ok := a.Flow.Provider(googleProvider)
+	require.True(t, ok)
+	assert.Equal(t, "google-option", google.ClientID)
+	assert.Equal(t, "google-option-secret", google.ClientSecret)
+}
+
+func testSessionKeyPEM(t *testing.T) []byte {
+	t.Helper()
+	priv, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	require.NoError(t, err)
+	der, err := x509.MarshalECPrivateKey(priv)
+	require.NoError(t, err)
+	return pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: der})
+}
+
+func signAndVerify(t *testing.T, a *Auth) {
+	t.Helper()
+	token, err := a.Issuer.SignToken("alice@example.com", time.Hour)
+	require.NoError(t, err)
+	user, err := a.Issuer.ValidateToken(t.Context(), token)
+	require.NoError(t, err)
+	assert.Equal(t, "alice@example.com", user.Email)
 }
 
 func TestSetupGoogleOnly(t *testing.T) {

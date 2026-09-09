@@ -1,14 +1,14 @@
 // Package auth wires the sign-in flow and the guard token issuer into a
-// http.ServeMux with sensible defaults, so a typical app needs a few calls
+// http.ServeMux with sensible defaults, so a typical app needs one call
 // instead of assembling providers and endpoints by hand.
 package auth
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
-	"os"
 	"strings"
 	"time"
 
@@ -28,12 +28,18 @@ const (
 	defaultTenant        = "common"
 )
 
-// Env vars consulted for the confidential-client secrets when no explicit
-// option is given. Leave unset for public clients, where PKCE alone protects
-// the code exchange.
+// Environment variables consulted by Setup when no explicit option is given.
+// Explicit options always take precedence. Every value may be the literal
+// secret or the path of a file containing it (see LoadSecret). A provider
+// client secret left unset records a public (PKCE-only) client.
 const (
-	EnvGoogleSecret    = "GOOGLE_CLIENT_SECRET"
-	EnvMicrosoftSecret = "AZURE_CLIENT_SECRET"
+	EnvOrigin            = "GUARD_ORIGIN"
+	EnvSessionKey        = "GUARD_SESSION_KEY"
+	EnvGoogleClientID    = "GOOGLE_CLIENT_ID"
+	EnvGoogleSecret      = "GOOGLE_CLIENT_SECRET"
+	EnvMicrosoftClientID = "AZURE_CLIENT_ID"
+	EnvMicrosoftSecret   = "AZURE_CLIENT_SECRET"
+	EnvMicrosoftTenant   = "AZURE_TENANT_ID"
 )
 
 // Auth is what Setup returns: the guard issuer, the registered sign-in flow,
@@ -81,21 +87,22 @@ func Microsoft(clientID string) Option {
 	return func(c *config) { c.microsoftClientID = clientID }
 }
 
-// Issuer is required. It sets the self-hosted guard issuer origin: every
-// signed-in user gets a guard token whose iss claim is origin, and the signing
-// keys are served at {origin}/.well-known/jwks.json so downstream services can
-// discover and validate them by fetching that URL.
+// Issuer sets the self-hosted guard issuer origin: every signed-in user gets a
+// guard token whose iss claim is origin, and the signing keys are served at
+// {origin}/.well-known/jwks.json so downstream services can discover and
+// validate them by fetching that URL. Optional when GUARD_ORIGIN is set.
 //
-// Without WithSessionKey the app generates an ECDSA P-256 key pair in memory,
-// which resets on restart (invalidating outstanding sessions). Configure a
-// stable key in production.
+// Without WithSessionKey or GUARD_SESSION_KEY the app generates an ECDSA P-256
+// key pair in memory, which resets on restart (invalidating outstanding
+// sessions). Configure a stable key in production.
 func Issuer(origin string) Option {
 	return func(c *config) { c.issuerOrigin = strings.TrimRight(origin, "/") }
 }
 
 // WithSessionKey supplies the PEM-encoded ECDSA P-256 private key the issuer
-// signs guard tokens with. Without it, an ephemeral in-memory key is generated
-// and sessions reset on restart. Reading from a file or environment at startup:
+// signs guard tokens with, overriding GUARD_SESSION_KEY. Without it, an
+// ephemeral in-memory key is generated and sessions reset on restart. Reading
+// from a file or environment at startup:
 //
 //	WithSessionKey(pemBytes)
 func WithSessionKey(pemBytes []byte) Option {
@@ -115,23 +122,22 @@ func EmailPassword(store guard.CredentialStore) Option {
 	return func(c *config) { c.emailPasswordStore = store }
 }
 
-// WithGoogleSecret sets the Google client secret, overriding the
-// GOOGLE_CLIENT_SECRET environment variable. Omit for a public client
-// (PKCE-only exchange).
+// WithGoogleSecret sets the Google client secret, overriding
+// GOOGLE_CLIENT_SECRET. Omit for a public client (PKCE-only exchange).
 func WithGoogleSecret(secret string) Option {
 	return func(c *config) { c.googleSecret = secret }
 }
 
-// WithMicrosoftSecret sets the Microsoft client secret, overriding the
-// AZURE_CLIENT_SECRET environment variable. Omit for a public client
-// (PKCE-only exchange).
+// WithMicrosoftSecret sets the Microsoft client secret, overriding
+// AZURE_CLIENT_SECRET. Omit for a public client (PKCE-only exchange).
 func WithMicrosoftSecret(secret string) Option {
 	return func(c *config) { c.microsoftSecret = secret }
 }
 
 // WithTenant restricts Microsoft sign-in to a single tenant: the tenant GUID
-// or a verified domain. Defaults to "common" (any tenant). When a tenant is
-// pinned, guests whose home tenant differs are rejected.
+// or a verified domain. Defaults to AZURE_TENANT_ID, then "common" (any
+// tenant). When a tenant is pinned, guests whose home tenant differs are
+// rejected.
 func WithTenant(tenant string) Option {
 	return func(c *config) { c.tenant = tenant }
 }
@@ -158,11 +164,15 @@ func WithValidator(name string, v guard.TokenValidator) Option {
 
 // Setup registers the sign-in page, provider OAuth routes, the guard JWKS
 // endpoint, the optional email/password login provider, and logout on mux,
-// returning the flow and validators for the auth middlewares. Issuer is
-// required.
+// returning the flow and validators for the auth middlewares.
+//
+// Configuration falls back to environment variables when the corresponding
+// option is not given (GUARD_ORIGIN, GUARD_SESSION_KEY, GOOGLE_CLIENT_ID,
+// GOOGLE_CLIENT_SECRET, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
+// AZURE_TENANT_ID); explicit options always win. GUARD_ORIGIN (or auth.Issuer)
+// is required.
 func Setup(mux *http.ServeMux, opts ...Option) (*Auth, error) {
 	cfg := config{
-		tenant:     defaultTenant,
 		validators: make(map[string]guard.TokenValidator),
 	}
 	for _, opt := range opts {
@@ -170,16 +180,60 @@ func Setup(mux *http.ServeMux, opts ...Option) (*Auth, error) {
 			opt(&cfg)
 		}
 	}
-	if cfg.issuerOrigin == "" {
-		return nil, fmt.Errorf("auth: Issuer(origin) is required")
+
+	var err error
+	resolve := func(name, current, fallback string) (string, error) {
+		if current != "" {
+			return current, nil
+		}
+		v, e := LoadSecret(name)
+		if errors.Is(e, ErrEnvMissing) {
+			return fallback, nil
+		}
+		if e != nil {
+			return "", fmt.Errorf("auth: %s: %w", name, e)
+		}
+		return v, nil
 	}
-	secretsFromEnv(&cfg)
+	if cfg.issuerOrigin, err = resolve(EnvOrigin, cfg.issuerOrigin, ""); err != nil {
+		return nil, err
+	}
+	cfg.issuerOrigin = strings.TrimRight(cfg.issuerOrigin, "/")
+	if cfg.issuerOrigin == "" {
+		return nil, fmt.Errorf("auth: Issuer(origin) or %s is required", EnvOrigin)
+	}
+	if len(cfg.sessionKey) == 0 {
+		cfg.sessionKey, err = LoadSecretBytes(EnvSessionKey)
+		if errors.Is(err, ErrEnvMissing) {
+			cfg.sessionKey = nil
+		} else if err != nil {
+			return nil, fmt.Errorf("auth: %s: %w", EnvSessionKey, err)
+		}
+	}
+	if cfg.googleClientID, err = resolve(EnvGoogleClientID, cfg.googleClientID, ""); err != nil {
+		return nil, err
+	}
+	if cfg.googleSecret, err = resolve(EnvGoogleSecret, cfg.googleSecret, ""); err != nil {
+		return nil, err
+	}
+	if cfg.microsoftClientID, err = resolve(EnvMicrosoftClientID, cfg.microsoftClientID, ""); err != nil {
+		return nil, err
+	}
+	if cfg.microsoftSecret, err = resolve(EnvMicrosoftSecret, cfg.microsoftSecret, ""); err != nil {
+		return nil, err
+	}
+	if cfg.tenant, err = resolve(EnvMicrosoftTenant, cfg.tenant, ""); err != nil {
+		return nil, err
+	}
+	if cfg.tenant == "" {
+		cfg.tenant = defaultTenant
+	}
 
 	issuerCfg := guard.IssuerConfig{Issuer: cfg.issuerOrigin, RoleStore: cfg.roleStore}
 	if len(cfg.sessionKey) > 0 {
 		issuerCfg.PrivateKeyPEM = cfg.sessionKey
 	} else {
-		slog.Warn("auth: no WithSessionKey configured; an ephemeral signing key will be generated and sessions will reset on restart")
+		slog.Warn("auth: no session key configured (WithSessionKey or " + EnvSessionKey + "); an ephemeral signing key will be generated and sessions will reset on restart")
 	}
 	issuer, err := guard.NewIssuer(issuerCfg)
 	if err != nil {
@@ -298,16 +352,5 @@ func newMicrosoftValidator(cfg config) (guard.TokenValidator, error) {
 func logSecretless(name, secret string) {
 	if secret == "" {
 		slog.Info("auth: provider has no client secret; it must be registered as a public client (PKCE)", "provider", name)
-	}
-}
-
-// secretsFromEnv fills any unset secret from the standard environment
-// variables; explicit options always take precedence.
-func secretsFromEnv(cfg *config) {
-	if cfg.googleSecret == "" {
-		cfg.googleSecret = os.Getenv(EnvGoogleSecret)
-	}
-	if cfg.microsoftSecret == "" {
-		cfg.microsoftSecret = os.Getenv(EnvMicrosoftSecret)
 	}
 }
