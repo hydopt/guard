@@ -55,7 +55,7 @@ files). Missing values fall back to their default.
 | Variable | Purpose | Default |
 | --- | --- | --- |
 | `GUARD_ORIGIN` | issuer origin (`iss` claim, JWKS base) | required, or `auth.Issuer(...)` |
-| `GUARD_SESSION_KEY` | ECDSA P-256 key PEM, literal or file path | ephemeral (sessions reset on restart) |
+| `GUARD_SESSION_KEY` | ECDSA P-256 key PEM, literal or file path | random per process when unset |
 | `GUARD_ROLES` | role assignments, one `<email>;<role1>;<role2>;...` per line | no roles |
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID | provider disabled |
 | `GOOGLE_CLIENT_SECRET` | Google client secret, literal or file path | public client (PKCE) |
@@ -65,6 +65,17 @@ files). Missing values fall back to their default.
 
 On Google Cloud or Azure, the `GOOGLE_*`/`AZURE_*` secrets can point at the
 mounted secret files; in docker-compose, at `/run/secrets/...` volumes.
+
+### Session keys and serverless
+
+`GUARD_SESSION_KEY` is only ephemeral when it is unset: every process then
+generates its own in-memory signing key. That is fine for a single process,
+but breaks multi-instance or serverless deployments, because each instance
+signs with a different key and serves its own JWKS — tokens minted by one
+instance fail validation on another. Point `GUARD_SESSION_KEY` at a stable key
+shared by the deployment (`make gen-key`, then keep it in a secret manager or
+mounted secret file). A consistent key also keeps sessions valid across
+restarts and cold starts.
 
 `GUARD_ROLES` auto-plugs a role store into `auth.Setup`, so zero-config role
 claims work out of the box:

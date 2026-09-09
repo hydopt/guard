@@ -241,7 +241,7 @@ func Setup(mux *http.ServeMux, opts ...Option) (*Auth, error) {
 	if len(cfg.sessionKey) > 0 {
 		issuerCfg.PrivateKeyPEM = cfg.sessionKey
 	} else {
-		slog.Warn("auth: no session key configured (WithSessionKey or " + EnvSessionKey + "); an ephemeral signing key will be generated and sessions will reset on restart")
+		slog.Warn("auth: no session key configured (WithSessionKey or " + EnvSessionKey + "); an ephemeral signing key will be generated. Tokens are only valid while this process is up and on this instance — set a stable key for serverless or multi-instance deployments")
 	}
 	issuer, err := guard.NewIssuer(issuerCfg)
 	if err != nil {
