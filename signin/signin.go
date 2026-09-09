@@ -4,9 +4,10 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strings"
 	"time"
 
-	"github.com/hydopt/bearer"
+	"github.com/hydopt/guard"
 	"golang.org/x/oauth2"
 )
 
@@ -18,6 +19,14 @@ const (
 
 type Config struct {
 	Providers []Provider
+
+	// Issuer mints guard session tokens at sign-in. When set, cookies and
+	// mode=token responses carry a freshly signed guard token (roles resolved
+	// from the issuer's role store) instead of the provider's raw ID token.
+	// Leave nil to keep storing provider tokens as before. Providers that sign
+	// their own tokens (BasicAuthProvider) always produce guard tokens
+	// regardless of this setting.
+	Issuer *guard.Issuer
 
 	// SessionTTL is the session cookie Max-Age. Defaults to one hour.
 	SessionTTL time.Duration
@@ -34,6 +43,7 @@ type Config struct {
 type Flow struct {
 	providers  map[string]*Provider
 	order      []string
+	issuer     *guard.Issuer
 	cookieName string
 	sessionTTL time.Duration
 	secure     bool
@@ -48,7 +58,8 @@ func New(cfg Config) (*Flow, error) {
 
 	f := &Flow{
 		providers:  make(map[string]*Provider, len(cfg.Providers)),
-		cookieName: bearer.SessionCookieName,
+		issuer:     cfg.Issuer,
+		cookieName: guard.SessionCookieName,
 		sessionTTL: cfg.SessionTTL,
 		secure:     cfg.Secure,
 		homePath:   cfg.HomePath,
@@ -108,10 +119,25 @@ func (f *Flow) oauthConfig(p *Provider, r *http.Request) *oauth2.Config {
 	return &oauth2.Config{
 		ClientID:     p.ClientID,
 		ClientSecret: p.ClientSecret,
-		Endpoint:     p.Endpoint,
+		Endpoint:     absoluteEndpoint(r, p.Endpoint),
 		RedirectURL:  redirect,
 		Scopes:       p.Scopes,
 	}
+}
+
+// absoluteEndpoint turns relative AuthURL/TokenURL values into absolute URLs
+// based on the incoming request. This lets a provider mount its own local
+// endpoints (e.g. the basic-auth login and token routes) without a hardcoded
+// origin.
+func absoluteEndpoint(r *http.Request, ep oauth2.Endpoint) oauth2.Endpoint {
+	origin := requestOrigin(r)
+	if ep.AuthURL != "" && !strings.Contains(ep.AuthURL, "://") {
+		ep.AuthURL = origin + ep.AuthURL
+	}
+	if ep.TokenURL != "" && !strings.Contains(ep.TokenURL, "://") {
+		ep.TokenURL = origin + ep.TokenURL
+	}
+	return ep
 }
 
 // Provider returns the named provider's configuration.

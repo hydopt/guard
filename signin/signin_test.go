@@ -14,7 +14,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/hydopt/bearer"
+	"github.com/hydopt/guard"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/oauth2"
@@ -24,18 +24,18 @@ import (
 // providers). Optionally overrides the resulting user, or rejects with an
 // error to simulate a failed validation.
 type fakeValidator struct {
-	user *bearer.User
+	user *guard.User
 	err  error
 }
 
-func (v fakeValidator) ValidateToken(_ context.Context, _ string) (*bearer.User, error) {
+func (v fakeValidator) ValidateToken(_ context.Context, _ string) (*guard.User, error) {
 	if v.err != nil {
 		return nil, v.err
 	}
 	if v.user != nil {
 		return v.user, nil
 	}
-	return &bearer.User{
+	return &guard.User{
 		Id:            "user-1",
 		Email:         "someone@example.com",
 		VerifiedEmail: true,
@@ -100,7 +100,7 @@ func newFakeOAuthServer(t *testing.T, issuedToken func(nonce string) string) *ht
 	return srv
 }
 
-func provider(oauth *httptest.Server, validator bearer.TokenValidator) Provider {
+func provider(oauth *httptest.Server, validator guard.TokenValidator) Provider {
 	return Provider{
 		Name:         "test",
 		Label:        "Test",
@@ -116,7 +116,7 @@ func provider(oauth *httptest.Server, validator bearer.TokenValidator) Provider 
 	}
 }
 
-func newServer(t *testing.T, issuedToken func(nonce string) string, validator bearer.TokenValidator) (*httptest.Server, *http.Client, *url.URL) {
+func newServer(t *testing.T, issuedToken func(nonce string) string, validator guard.TokenValidator) (*httptest.Server, *http.Client, *url.URL) {
 	t.Helper()
 	oauth := newFakeOAuthServer(t, issuedToken)
 	if validator == nil {
@@ -216,9 +216,51 @@ func TestFlow_CompleteLogin(t *testing.T) {
 
 	target := completeLogin(t, client, server, "/dashboard")
 	assert.Equal(t, "/dashboard", target)
-	claims := idTokenClaims(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
+	claims := idTokenClaims(t, sessionCookie(client.Jar, serverURL, guard.SessionCookieName))
 	assert.Equal(t, "someone@example.com", claims["email"])
 	assert.NotEmpty(t, claims["nonce"], "the token must carry the nonce we sent")
+}
+
+func TestFlow_MintsGuardTokens(t *testing.T) {
+	issuer, err := guard.NewIssuer(guard.IssuerConfig{
+		Issuer: "https://auth.example.test",
+		RoleStore: guard.InMemoryRoleStore{
+			"someone@example.com": {"admin"},
+		},
+	})
+	require.NoError(t, err)
+
+	oauth := newFakeOAuthServer(t, nil)
+	flow, err := New(Config{Providers: []Provider{provider(oauth, fakeValidator{})}, Issuer: issuer})
+	require.NoError(t, err)
+
+	mux := http.NewServeMux()
+	flow.Register(mux)
+	server := httptest.NewServer(mux)
+	t.Cleanup(server.Close)
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	completeLogin(t, client, server, "/")
+
+	session := sessionCookie(client.Jar, serverURL, guard.SessionCookieName)
+	require.NotEmpty(t, session)
+
+	user, err := issuer.ValidateToken(context.Background(), session)
+	require.NoError(t, err)
+	assert.Equal(t, "someone@example.com", user.Email)
+	assert.Equal(t, "test", user.Provider, "the minted token records the sign-in provider")
+	assert.Equal(t, []string{"admin"}, user.Roles, "roles are resolved from the issuer's role store at mint time")
+	claims := idTokenClaims(t, session)
+	assert.Equal(t, "https://auth.example.test", claims["iss"])
 }
 
 func TestFlow_OpenRedirectBlocked(t *testing.T) {
@@ -252,7 +294,7 @@ func TestFlow_MismatchedState(t *testing.T) {
 
 func TestFlow_InvalidIDToken(t *testing.T) {
 	server, client, _ := newServer(t, func(string) string { return "bad-id-token" },
-		fakeValidator{err: bearer.ErrUnauthorized})
+		fakeValidator{err: guard.ErrUnauthorized})
 	state, code := startLogin(t, client, server, "")
 
 	resp := get(t, client, callbackURL(server, state, code, ""))
@@ -293,7 +335,7 @@ func TestFlow_ModeToken(t *testing.T) {
 	claims := idTokenClaims(t, payload.Token)
 	assert.Equal(t, "someone@example.com", claims["email"])
 	assert.NotEmpty(t, claims["nonce"])
-	assert.Empty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName),
+	assert.Empty(t, sessionCookie(client.Jar, serverURL, guard.SessionCookieName),
 		"mode=token must not set the session cookie")
 	stateCookie := findCookie(t, resp, stateCookieName)
 	require.NotNil(t, stateCookie, "state cookie must be cleared")
@@ -365,7 +407,7 @@ func TestFlow_CookieTtlClampedToTokenExpiry(t *testing.T) {
 	require.Equal(t, http.StatusFound, resp.StatusCode)
 	require.Equal(t, "/", resp.Header.Get("Location"))
 
-	cookie := findCookie(t, resp, bearer.SessionCookieName)
+	cookie := findCookie(t, resp, guard.SessionCookieName)
 	require.NotNil(t, cookie)
 	require.NotEmpty(t, cookie.Value)
 	assert.GreaterOrEqual(t, cookie.MaxAge, 80)
@@ -424,7 +466,7 @@ func TestFlow_Logout(t *testing.T) {
 	server, client, serverURL := newServer(t, nil, nil)
 	completeLogin(t, client, server, "/")
 
-	assert.NotEmpty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
+	assert.NotEmpty(t, sessionCookie(client.Jar, serverURL, guard.SessionCookieName))
 
 	req, err := http.NewRequest(http.MethodPost, server.URL+"/auth/logout", nil)
 	require.NoError(t, err)
@@ -433,7 +475,7 @@ func TestFlow_Logout(t *testing.T) {
 	resp.Body.Close()
 
 	assert.Equal(t, http.StatusFound, resp.StatusCode)
-	assert.Empty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
+	assert.Empty(t, sessionCookie(client.Jar, serverURL, guard.SessionCookieName))
 }
 
 func TestFlow_LogoutIgnoresRequestWithoutSessionCookie(t *testing.T) {
@@ -446,7 +488,7 @@ func TestFlow_LogoutIgnoresRequestWithoutSessionCookie(t *testing.T) {
 	resp.Body.Close()
 
 	assert.Equal(t, http.StatusFound, resp.StatusCode)
-	assert.Empty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName),
+	assert.Empty(t, sessionCookie(client.Jar, serverURL, guard.SessionCookieName),
 		"logout without a session cookie (e.g. cross-site CSRF) must not issue anything")
 }
 
@@ -459,11 +501,11 @@ func TestFlow_Private(t *testing.T) {
 	flow.Register(mux)
 
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user := bearer.MustGetUserFromCtx(r.Context())
+		user := guard.MustGetUserFromCtx(r.Context())
 		_, _ = w.Write([]byte(user.Email))
 	})
-	mux.Handle("/private", bearer.RequireVerifiedEmail(
-		[]bearer.TokenValidator{fakeValidator{}},
+	mux.Handle("/private", guard.RequireVerifiedEmail(
+		[]guard.TokenValidator{fakeValidator{}},
 	)(protected))
 
 	server := httptest.NewServer(mux)
@@ -481,7 +523,7 @@ func TestFlow_Private(t *testing.T) {
 
 	target := completeLogin(t, client, server, "/private")
 	assert.Equal(t, "/private", target)
-	assert.NotEmpty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
+	assert.NotEmpty(t, sessionCookie(client.Jar, serverURL, guard.SessionCookieName))
 
 	resp := get(t, client, server.URL+"/private")
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
@@ -494,14 +536,14 @@ func TestFlow_RequireLogin(t *testing.T) {
 	require.NoError(t, err)
 
 	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		user := bearer.MustGetUserFromCtx(r.Context())
+		user := guard.MustGetUserFromCtx(r.Context())
 		_, _ = w.Write([]byte(user.Email))
 	})
 
 	mux := http.NewServeMux()
 	flow.Register(mux)
 	mux.Handle("/private", flow.RequireLogin(
-		[]bearer.TokenValidator{fakeValidator{}},
+		[]guard.TokenValidator{fakeValidator{}},
 	)(protected))
 
 	server := httptest.NewServer(mux)
@@ -558,7 +600,7 @@ func TestFlow_RequireLogin(t *testing.T) {
 	t.Run("passesThroughWithCookie", func(t *testing.T) {
 		target := completeLogin(t, client, server, "/private")
 		assert.Equal(t, "/private", target)
-		assert.NotEmpty(t, sessionCookie(client.Jar, serverURL, bearer.SessionCookieName))
+		assert.NotEmpty(t, sessionCookie(client.Jar, serverURL, guard.SessionCookieName))
 
 		resp := get(t, client, server.URL+"/private")
 		require.Equal(t, http.StatusOK, resp.StatusCode)
@@ -590,7 +632,7 @@ func TestFlow_DefaultPaths(t *testing.T) {
 	assert.Equal(t, "/auth/demo/callback", flow.providers["demo"].CallbackPath)
 	assert.Equal(t, "demo", flow.providers["demo"].Label)
 	assert.Equal(t, []string{"openid", "email", "profile"}, flow.providers["demo"].Scopes)
-	assert.Equal(t, bearer.SessionCookieName, flow.cookieName)
+	assert.Equal(t, guard.SessionCookieName, flow.cookieName)
 	assert.Equal(t, time.Hour, flow.sessionTTL)
 	assert.Equal(t, "/", flow.homePath)
 	assert.Equal(t, "/signin", flow.signInPath)

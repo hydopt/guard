@@ -3,7 +3,7 @@ package signin
 import (
 	"golang.org/x/oauth2"
 
-	"github.com/hydopt/bearer"
+	"github.com/hydopt/guard"
 )
 
 type Provider struct {
@@ -22,5 +22,11 @@ type Provider struct {
 	StartPath    string
 	CallbackPath string
 
-	Validator bearer.TokenValidator
+	// SignsSessionToken marks a provider whose sign-in flow already produces a
+	// guard session token (e.g. BasicAuthProvider, which mints one in its local
+	// token endpoint). The callback then stores that token as-is instead of
+	// minting a second one when Config.Issuer is set.
+	SignsSessionToken bool
+
+	Validator guard.TokenValidator
 }

@@ -1,4 +1,4 @@
-package bearer
+package guard
 
 import (
 	"context"
@@ -19,23 +19,15 @@ func (m *mockTokenValidator) ValidateToken(ctx context.Context, token string) (*
 	return m.user, m.err
 }
 
-type mockRoleStore struct {
-	roles map[string]string
-}
-
-func (m *mockRoleStore) RoleByEmail(ctx context.Context, email string) (string, error) {
-	if role, ok := m.roles[email]; ok {
-		return role, nil
+// withUser injects a user into the request context, standing in for
+// RequireVerifiedEmail further up the chain.
+func withUser(user *User) func(next http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			ctx := context.WithValue(r.Context(), userKey, user)
+			next.ServeHTTP(w, r.WithContext(ctx))
+		})
 	}
-	return "", nil
-}
-
-type mockIntRoleStore struct {
-	roles map[string]int
-}
-
-func (m *mockIntRoleStore) RoleByEmail(ctx context.Context, email string) (int, error) {
-	return m.roles[email], nil
 }
 
 func TestChainOrder(t *testing.T) {
@@ -167,29 +159,55 @@ func TestRequireVerifiedEmailRejectsNonBearerScheme(t *testing.T) {
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
-func TestRequireMinimumRoleRejectsForbidden(t *testing.T) {
-	user := &User{Email: "user@example.com"}
-	store := &mockIntRoleStore{roles: map[string]int{"user@example.com": 2}}
+func TestRequireAnyRoleAllows(t *testing.T) {
+	admin := &User{Email: "admin@example.com", Roles: []string{"editor", "admin"}}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
 
+	mw := Chain(withUser(admin), RequireAnyRole("viewer", "admin"))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	mw(handler).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestRequireAnyRoleRejectsForbidden(t *testing.T) {
+	user := &User{Email: "user@example.com", Roles: []string{"viewer"}}
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		t.Error("handler should not be called")
 	})
 
-	mw := Chain(
-		func(next http.Handler) http.Handler {
-			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				ctx := context.WithValue(r.Context(), userKey, user)
-				next.ServeHTTP(w, r.WithContext(ctx))
-			})
-		},
-		RequireMinimumRole(store, 3),
-	)
+	mw := Chain(withUser(user), RequireAnyRole("admin", "owner"))
 
 	req := httptest.NewRequest(http.MethodGet, "/", nil)
 	rec := httptest.NewRecorder()
-
 	mw(handler).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+}
 
+func TestRequireAllRolesAllows(t *testing.T) {
+	user := &User{Email: "user@example.com", Roles: []string{"admin", "editor"}}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { w.WriteHeader(http.StatusOK) })
+
+	mw := Chain(withUser(user), RequireAllRoles("admin", "editor"))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	mw(handler).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+}
+
+func TestRequireAllRolesRejectsMissing(t *testing.T) {
+	user := &User{Email: "user@example.com", Roles: []string{"admin"}}
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Error("handler should not be called")
+	})
+
+	mw := Chain(withUser(user), RequireAllRoles("admin", "editor"))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	mw(handler).ServeHTTP(rec, req)
 	require.Equal(t, http.StatusForbidden, rec.Code)
 }
 

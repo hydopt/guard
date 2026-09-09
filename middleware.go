@@ -1,7 +1,6 @@
-package bearer
+package guard
 
 import (
-	"cmp"
 	"context"
 	"log/slog"
 	"net/http"
@@ -59,16 +58,42 @@ func RequireVerifiedEmail(validators []TokenValidator) Middleware {
 	}
 }
 
-func RequireMinimumRole[T cmp.Ordered](store RoleStore[T], minimumRole T) Middleware {
+// RequireAnyRole denies the request unless the authenticated user holds at
+// least one of the given roles. Roles come from the guard token's claims, so
+// no role store is consulted on the request path. Requires RequireVerifiedEmail
+// (or equivalent) earlier in the chain.
+func RequireAnyRole(required ...string) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
 				user := MustGetUserFromCtx(r.Context())
-				role, err := store.RoleByEmail(r.Context(), user.Email)
-				if err != nil || role < minimumRole {
-					slog.Info("Insufficient privileges", "error", err, "role", role)
-					http.Error(w, "Forbidden", http.StatusForbidden)
-					return
+				for _, want := range required {
+					if slices.Contains(user.Roles, want) {
+						next.ServeHTTP(w, r)
+						return
+					}
+				}
+				slog.Info("Insufficient privileges", "email", user.Email)
+				http.Error(w, "Forbidden", http.StatusForbidden)
+			})
+	}
+}
+
+// RequireAllRoles denies the request unless the authenticated user holds every
+// given role. Roles come from the guard token's claims, so no role store is
+// consulted on the request path. Requires RequireVerifiedEmail (or equivalent)
+// earlier in the chain.
+func RequireAllRoles(required ...string) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				user := MustGetUserFromCtx(r.Context())
+				for _, want := range required {
+					if !slices.Contains(user.Roles, want) {
+						slog.Info("Insufficient privileges", "email", user.Email)
+						http.Error(w, "Forbidden", http.StatusForbidden)
+						return
+					}
 				}
 				next.ServeHTTP(w, r)
 			})

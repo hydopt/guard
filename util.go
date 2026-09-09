@@ -1,4 +1,4 @@
-package bearer
+package guard
 
 func Assert(cond bool, msg string) {
 	if !cond {

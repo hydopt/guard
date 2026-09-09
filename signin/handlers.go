@@ -11,8 +11,8 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hydopt/bearer"
-	"github.com/hydopt/bearer/components"
+	"github.com/hydopt/guard"
+	"github.com/hydopt/guard/components"
 	"golang.org/x/oauth2"
 )
 
@@ -21,8 +21,8 @@ import (
 // back. Requests that carry credentials but fail validation still get a 401,
 // as do non-GET requests without credentials (a redirect would silently turn a
 // POST into a GET and lose the body).
-func (f *Flow) RequireLogin(validators []bearer.TokenValidator) bearer.Middleware {
-	auth := bearer.RequireVerifiedEmail(validators)
+func (f *Flow) RequireLogin(validators []guard.TokenValidator) guard.Middleware {
+	auth := guard.RequireVerifiedEmail(validators)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if f.hasCredentials(r) {
@@ -144,7 +144,8 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 			http.Error(w, "Token response missing id_token", http.StatusUnauthorized)
 			return
 		}
-		if _, err := p.Validator.ValidateToken(r.Context(), idToken); err != nil {
+		user, err := p.Validator.ValidateToken(r.Context(), idToken)
+		if err != nil {
 			slog.Info("token validation failed", "provider", p.Name, "error", err)
 			http.Error(w, "Invalid token", http.StatusUnauthorized)
 			return
@@ -159,14 +160,45 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 			return
 		}
 
-		if r.URL.Query().Get("mode") == "token" {
-			writeTokenResponse(w, idToken, f.sessionTTL)
+		sessionToken, ttl, err := f.sessionToken(p, user, idToken)
+		if err != nil {
+			slog.Error("session token minting failed", "provider", p.Name, "error", err)
+			http.Error(w, "Internal Server Error", http.StatusInternalServerError)
 			return
 		}
 
-		f.writeSessionCookie(w, idToken, sessionCookieTTL(f.sessionTTL, idToken))
+		if r.URL.Query().Get("mode") == "token" {
+			writeTokenResponse(w, sessionToken, ttl)
+			return
+		}
+
+		f.writeSessionCookie(w, sessionToken, ttl)
 		http.Redirect(w, r, req.Next, http.StatusFound)
 	}
+}
+
+// sessionToken decides what goes into the session cookie (and mode=token
+// responses). Providers that already signed a guard token (SignsSessionToken)
+// store it as-is. Otherwise, when Config.Issuer is set, a guard token is minted
+// for the validated user (roles resolved from the role store). Without an
+// issuer, the provider's raw ID token is stored (legacy behavior) and the
+// cookie lifetime is clamped so it never outlives the token.
+func (f *Flow) sessionToken(p *Provider, user *guard.User, idToken string) (token string, ttl time.Duration, err error) {
+	if p.SignsSessionToken {
+		return idToken, sessionCookieTTL(f.sessionTTL, idToken), nil
+	}
+	if f.issuer != nil {
+		opts := []guard.TokenOption{guard.WithProvider(p.Name)}
+		if len(user.Roles) > 0 {
+			opts = append(opts, guard.WithRoles(user.Roles))
+		}
+		minted, err := f.issuer.SignToken(user.Email, f.sessionTTL, opts...)
+		if err != nil {
+			return "", 0, err
+		}
+		return minted, f.sessionTTL, nil
+	}
+	return idToken, sessionCookieTTL(f.sessionTTL, idToken), nil
 }
 
 // loginRequest is what the state cookie holds across the OAuth round trip:
@@ -202,13 +234,11 @@ func (f *Flow) handleLogout(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, f.homePath, http.StatusFound)
 }
 
-// writeTokenResponse reports the token together with its remaining lifetime
-// (clamped like the session cookie: at most sessionTTL, never beyond exp).
-func writeTokenResponse(w http.ResponseWriter, idToken string, sessionTTL time.Duration) {
-	ttl := sessionCookieTTL(sessionTTL, idToken)
+// writeTokenResponse reports the token together with its remaining lifetime.
+func writeTokenResponse(w http.ResponseWriter, token string, ttl time.Duration) {
 	w.Header().Set("Content-Type", "application/json")
 	_ = json.NewEncoder(w).Encode(map[string]any{
-		"token":      idToken,
+		"token":      token,
 		"token_type": "Bearer",
 		"expires_in": int(ttl.Seconds()),
 	})
@@ -238,6 +268,12 @@ func safeRedirect(target, fallback string) string {
 // server, which validates it against the registered callback, so a spoofed
 // header cannot be abused.
 func redirectURL(r *http.Request, path string) string {
+	return requestOrigin(r) + path
+}
+
+// requestOrigin is the scheme://host prefix for the current request, honoring
+// the X-Forwarded-* headers set by TLS-terminating proxies.
+func requestOrigin(r *http.Request) string {
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
@@ -251,8 +287,7 @@ func redirectURL(r *http.Request, path string) string {
 		host = fwd
 	}
 
-	u := url.URL{Scheme: scheme, Host: host, Path: path}
-	return u.String()
+	return scheme + "://" + host
 }
 
 func firstHeaderValue(v string) string {

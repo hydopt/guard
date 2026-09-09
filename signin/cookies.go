@@ -54,7 +54,7 @@ func (f *Flow) writeCookie(w http.ResponseWriter, o cookieOptions) {
 }
 
 // SetSessionCookie stores token as the session cookie, authenticating
-// subsequent requests for middlewares built on bearer.SessionCookieName.
+// subsequent requests for middlewares built on guard.SessionCookieName.
 func (f *Flow) SetSessionCookie(w http.ResponseWriter, token string) {
 	f.writeSessionCookie(w, token, f.sessionTTL)
 }

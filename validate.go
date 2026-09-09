@@ -1,4 +1,4 @@
-package bearer
+package guard
 
 import (
 	"context"
@@ -21,6 +21,11 @@ type User struct {
 	Email         string `json:"email"`
 	VerifiedEmail bool   `json:"emailVerified"`
 	Sub           string `json:"sub"`
+	// Roles are the authorization roles carried by a guard session token.
+	Roles []string `json:"roles,omitempty"`
+	// Provider is the sign-in provider that established the session (e.g.
+	// "google", "microsoft", "basic-auth"), or "" for programmatic tokens.
+	Provider string `json:"provider,omitempty"`
 	// Claims holds the raw ID token claims (e.g. groups, roles, custom
 	// claims). Excluded from JSON marshaling so token internals do not leak
 	// into API responses by default.

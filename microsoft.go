@@ -1,4 +1,4 @@
-package bearer
+package guard
 
 import (
 	"context"
@@ -18,7 +18,7 @@ var _ TokenValidator = (*MicrosoftTokenValidator)(nil)
 
 type MicrosoftTokenValidator struct {
 	ClientId string
-	Verifier *oidc.IDTokenVerifier
+	verifier *oidc.IDTokenVerifier
 	// pinnedTid restricts tokens to a specific tenant (single-tenant mode).
 	// Empty for the tenant-independent modes ("common", "organizations",
 	// "consumers").
@@ -76,7 +76,7 @@ func newMultiTenantMicrosoftValidator(tenantId, clientId string) *MicrosoftToken
 	keys := oidc.NewRemoteKeySet(ctx, fmt.Sprintf(msBaseURL, tenantId)+"/discovery/v2.0/keys")
 	return &MicrosoftTokenValidator{
 		ClientId: clientId,
-		Verifier: oidc.NewVerifier(msIssuerTemplate, keys, &oidc.Config{ClientID: clientId, SkipIssuerCheck: true}),
+		verifier: oidc.NewVerifier(msIssuerTemplate, keys, &oidc.Config{ClientID: clientId, SkipIssuerCheck: true}),
 	}
 }
 
@@ -92,7 +92,7 @@ func newSingleTenantMicrosoftValidator(tenantId, clientId string) (*MicrosoftTok
 	}
 	return &MicrosoftTokenValidator{
 		ClientId:  clientId,
-		Verifier:  oidc.NewVerifier(msIssuerTemplate, oidc.NewRemoteKeySet(ctx, meta.JWKSURL), &oidc.Config{ClientID: clientId, SkipIssuerCheck: true}),
+		verifier:  oidc.NewVerifier(msIssuerTemplate, oidc.NewRemoteKeySet(ctx, meta.JWKSURL), &oidc.Config{ClientID: clientId, SkipIssuerCheck: true}),
 		pinnedTid: pinnedTid,
 	}, nil
 }
@@ -168,7 +168,7 @@ type microsoftClaims struct {
 }
 
 func (m *MicrosoftTokenValidator) ValidateToken(ctx context.Context, token string) (*User, error) {
-	idToken, err := m.Verifier.Verify(ctx, token)
+	idToken, err := m.verifier.Verify(ctx, token)
 	if err != nil {
 		return nil, err
 	}

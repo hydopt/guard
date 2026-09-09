@@ -1,4 +1,4 @@
-package bearer
+package guard
 
 import (
 	"crypto/rand"
@@ -38,7 +38,7 @@ func newTestValidator(t *testing.T, clientId string) (*MicrosoftTokenValidator, 
 
 	return &MicrosoftTokenValidator{
 		ClientId: clientId,
-		Verifier: provider.Verifier(&oidc.Config{ClientID: clientId, SkipIssuerCheck: true}),
+		verifier: provider.Verifier(&oidc.Config{ClientID: clientId, SkipIssuerCheck: true}),
 	}, priv, srv.URL
 }
 
@@ -68,7 +68,7 @@ func TestNewMicrosoftTokenValidatorMultitenantModes(t *testing.T) {
 		v, err := NewMicrosoftTokenValidator(tenant, "client-id")
 		require.NoError(t, err, "tenant %q", tenant)
 		require.Equal(t, "", v.pinnedTid, "tenant %q", tenant)
-		require.NotNil(t, v.Verifier)
+		require.NotNil(t, v.verifier)
 	}
 }
 

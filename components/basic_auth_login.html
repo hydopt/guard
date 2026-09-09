@@ -1,0 +1,102 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, initial-scale=1">
+	<title>Sign in with email</title>
+	<style>
+		:root {
+			--bg: #f5f6f8;
+			--card: #ffffff;
+			--border: #e2e4e8;
+			--text: #1f2328;
+			--muted: #6a737d;
+			--accent: #0969da;
+			--danger: #cf222e;
+		}
+		* { box-sizing: border-box; }
+		body {
+			margin: 0;
+			min-height: 100vh;
+			display: grid;
+			place-items: center;
+			background: var(--bg);
+			font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+			color: var(--text);
+		}
+		.card {
+			width: min(420px, calc(100vw - 32px));
+			background: var(--card);
+			border: 1px solid var(--border);
+			border-radius: 12px;
+			padding: 40px 36px;
+			box-shadow: 0 8px 24px rgba(0, 0, 0, .06);
+		}
+		h1 { margin: 0 0 8px; font-size: 22px; }
+		.subtitle { margin: 0 0 24px; color: var(--muted); font-size: 14px; }
+		label {
+			display: block;
+			margin-bottom: 6px;
+			font-size: 13px;
+			font-weight: 500;
+			color: var(--text);
+		}
+		input {
+			width: 100%;
+			padding: 10px 12px;
+			margin-bottom: 16px;
+			border: 1px solid var(--border);
+			border-radius: 8px;
+			font-size: 15px;
+			background: var(--card);
+			color: var(--text);
+		}
+		input:focus {
+			outline: none;
+			border-color: var(--accent);
+			box-shadow: 0 0 0 3px rgba(9, 105, 218, .15);
+		}
+		button {
+			width: 100%;
+			padding: 12px 16px;
+			border: none;
+			border-radius: 8px;
+			background: var(--accent);
+			color: #fff;
+			font-size: 15px;
+			font-weight: 500;
+			cursor: pointer;
+			transition: background .15s ease;
+		}
+		button:hover { background: #0860c9; }
+		.error {
+			margin: 0 0 16px;
+			padding: 10px 12px;
+			border: 1px solid #ffc9cd;
+			border-radius: 8px;
+			background: #ffebe9;
+			color: var(--danger);
+			font-size: 14px;
+		}
+	</style>
+</head>
+<body>
+	<main class="card">
+		<h1>Sign in</h1>
+		<p class="subtitle">Enter your email and password to continue.</p>
+		{{if .Error}}
+		<p class="error" role="alert">{{.Error}}</p>
+		{{end}}
+		<form method="post" autocomplete="off">
+			{{range .Hidden}}
+			<input type="hidden" name="{{.Name}}" value="{{.Value}}">
+			{{end}}
+			<label for="email">Email</label>
+			<input id="email" type="email" name="email" value="{{.Email}}" required autofocus autocomplete="username">
+			<label for="password">Password</label>
+			<input id="password" type="password" name="password" required autocomplete="current-password">
+			<button type="submit">Continue</button>
+		</form>
+	</main>
+</body>
+</html>

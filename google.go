@@ -1,4 +1,4 @@
-package bearer
+package guard
 
 import (
 	"context"
