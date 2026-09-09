@@ -56,6 +56,7 @@ files). Missing values fall back to their default.
 | --- | --- | --- |
 | `GUARD_ORIGIN` | issuer origin (`iss` claim, JWKS base) | required, or `auth.Issuer(...)` |
 | `GUARD_SESSION_KEY` | ECDSA P-256 key PEM, literal or file path | ephemeral (sessions reset on restart) |
+| `GUARD_ROLES` | role assignments, one `<email>;<role1>;<role2>;...` per line | no roles |
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID | provider disabled |
 | `GOOGLE_CLIENT_SECRET` | Google client secret, literal or file path | public client (PKCE) |
 | `AZURE_CLIENT_ID` | Microsoft OAuth client ID | provider disabled |
@@ -64,6 +65,53 @@ files). Missing values fall back to their default.
 
 On Google Cloud or Azure, the `GOOGLE_*`/`AZURE_*` secrets can point at the
 mounted secret files; in docker-compose, at `/run/secrets/...` volumes.
+
+`GUARD_ROLES` auto-plugs a role store into `auth.Setup`, so zero-config role
+claims work out of the box:
+
+```sh
+GUARD_ROLES="alice@example.com;admin;user
+bob@example.com;user"
+```
+
+## Store implementations
+
+guard ships a few stores for the `CredentialStore` and `RoleStore` interfaces:
+
+- `guard.InMemoryCredentialStore` and `guard.InMemoryRoleStore` — static maps,
+  ideal for tests and demos.
+- `guard.NewEnvRoleStore()` — role assignments from `GUARD_ROLES`.
+- `github.com/hydopt/guard/firestore` — an optional, separately versioned
+  module: one Firestore collection of user documents (`password_hash` bcrypt
+  hashes + `roles`) implements both interfaces. It only pulls in
+  `cloud.google.com/go/firestore` when you import it:
+
+```go
+import "github.com/hydopt/guard/firestore"
+
+store := firestore.NewStore(client, "users")
+a, err := auth.Setup(mux,
+    auth.EmailPassword(store),
+    auth.WithRoleStore(store),
+)
+```
+
+- `github.com/hydopt/guard/sqlstore` — an optional, separately versioned
+  module built on stdlib `database/sql` with a normalized
+  `users`/`user_roles` schema, so it works with any driver (postgres, mysql,
+  sqlite, ...). It pulls in no driver itself:
+
+```go
+import "github.com/hydopt/guard/sqlstore"
+
+db, _ := sql.Open("postgres", connStr)
+store := sqlstore.NewStore(db, "users", "user_roles")
+if err := store.Migrate(ctx); err != nil { /* handle */ }
+a, err := auth.Setup(mux,
+    auth.EmailPassword(store),
+    auth.WithRoleStore(store),
+)
+```
 
 ## Validation and middleware
 

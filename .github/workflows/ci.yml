@@ -31,3 +31,28 @@ jobs:
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - name: Run example integration tests
         run: make -C example/basic-auth test
+
+  firestore:
+    runs-on: ubuntu-latest
+    container: gcr.io/firebase-tools:latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - name: Test firestore stores against the emulator
+        run: firebase emulators:exec --only firestore --project test-project "go test ./..."
+        working-directory: firestore
+
+  sqlstore:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.27"
+      - run: go mod tidy
+        working-directory: sqlstore
+      - name: Test sqlstore with in-memory sqlite
+        run: go test ./...
+        working-directory: sqlstore
