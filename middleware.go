@@ -100,6 +100,29 @@ func RequireAllRoles(required ...string) Middleware {
 	}
 }
 
+// EnrichFromStore replaces the roles on the authenticated user with the roles
+// resolved from the given RoleStore at request time. This ensures the user's
+// roles reflect the current state of the store rather than the (potentially
+// stale) roles embedded in the token. On store errors the roles are cleared
+// and the request continues (fail-open). Requires RequireVerifiedEmail (or
+// equivalent) earlier in the chain.
+func EnrichFromStore(store RoleStore) Middleware {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(
+			func(w http.ResponseWriter, r *http.Request) {
+				user := MustGetUserFromCtx(r.Context())
+				roles, err := store.RolesByEmail(r.Context(), user.Email)
+				if err != nil {
+					slog.Error("enrich roles: store lookup failed", "email", user.Email, "error", err)
+					user.Roles = []string{}
+				} else {
+					user.Roles = roles
+				}
+				next.ServeHTTP(w, r)
+			})
+	}
+}
+
 func RequireWhiteListedEmail(whitelist []string) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(
