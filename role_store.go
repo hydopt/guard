@@ -4,7 +4,8 @@ import "context"
 
 // RoleStore resolves the roles for an email address. It is consulted when a
 // guard session token is minted, so the resulting roles ride along as token
-// claims and downstream services can authorize without contacting the store.
+// claims. It is also used at request time by the EnrichFromStore middleware to
+// refresh roles from the authoritative source.
 type RoleStore interface {
 	RolesByEmail(ctx context.Context, email string) ([]string, error)
 }

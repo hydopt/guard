@@ -2,6 +2,7 @@ package guard
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -297,4 +298,70 @@ func TestChainWithAuthAndWhitelist(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.True(t, called)
+}
+
+type errRoleStore struct{ err error }
+
+func (e errRoleStore) RolesByEmail(_ context.Context, _ string) ([]string, error) {
+	return nil, e.err
+}
+
+func TestEnrichFromStoreOverwritesRoles(t *testing.T) {
+	user := &User{Email: "alice@example.com", Roles: []string{"stale"}}
+	store := InMemoryRoleStore{"alice@example.com": {"admin", "editor"}}
+
+	var gotRoles []string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRoles = MustGetUserFromCtx(r.Context()).Roles
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := Chain(withUser(user), EnrichFromStore(store))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	mw(handler).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, []string{"admin", "editor"}, gotRoles)
+}
+
+func TestEnrichFromStoreClearsOnStoreError(t *testing.T) {
+	user := &User{Email: "alice@example.com", Roles: []string{"admin"}}
+	store := errRoleStore{err: errors.New("database down")}
+
+	var gotRoles []string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRoles = MustGetUserFromCtx(r.Context()).Roles
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := Chain(withUser(user), EnrichFromStore(store))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	mw(handler).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Empty(t, gotRoles)
+}
+
+func TestEnrichFromStoreEmptyResult(t *testing.T) {
+	user := &User{Email: "alice@example.com", Roles: []string{"admin"}}
+	store := InMemoryRoleStore{}
+
+	var gotRoles []string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRoles = MustGetUserFromCtx(r.Context()).Roles
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := Chain(withUser(user), EnrichFromStore(store))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	mw(handler).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Empty(t, gotRoles)
 }
