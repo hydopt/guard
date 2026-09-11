@@ -28,7 +28,8 @@ import "github.com/hydopt/guard/auth"
 a, err := auth.Setup(mux) // env-configured: providers, origin, signing key
 if err != nil { /* handle */ }
 
-mux.Handle("/private", a.Flow.RequireLogin(a.Validators)(handler))
+mux.Handle("/", a.OptionalAuth()(handler))     // pass through, user optional
+mux.Handle("/private", a.RequireLogin()(handler)) // redirects to /signin when needed
 ```
 
 It registers the sign-in page (`/signin`), the provider routes, logout, and the

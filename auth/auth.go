@@ -43,8 +43,8 @@ const (
 	EnvMicrosoftTenant   = "AZURE_TENANT_ID"
 )
 
-// Auth is what Setup returns: the guard issuer, the registered sign-in flow,
-// and the middleware validators ready to feed the auth middlewares.
+// Auth is what Setup returns. Use the RequireLogin, OptionalAuth, and
+// RequireVerifiedEmail methods to obtain middleware for route protection.
 type Auth struct {
 	Flow   *signin.Flow
 	Issuer *guard.Issuer
@@ -54,6 +54,32 @@ type Auth struct {
 	Validators []guard.TokenValidator
 	// JWKSURL is the absolute discovery URL for the guard signing keys.
 	JWKSURL string
+}
+
+// RequireLogin returns middleware that redirects unauthenticated GET/HEAD
+// requests to the sign-in page and rejects other methods with 401. When no
+// sign-in flow is configured (issuer-only mode), it always returns 401.
+func (a *Auth) RequireLogin() guard.Middleware {
+	if a.Flow == nil {
+		return func(next http.Handler) http.Handler {
+			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				http.Error(w, "Not authorized", http.StatusUnauthorized)
+			})
+		}
+	}
+	return a.Flow.RequireLogin(a.Validators)
+}
+
+// OptionalAuth returns middleware that passes through unauthenticated requests.
+// Handlers use guard.GetUserFromCtx to check whether a user is present.
+func (a *Auth) OptionalAuth() guard.Middleware {
+	return guard.OptionalAuth(a.Validators)
+}
+
+// RequireVerifiedEmail returns middleware that rejects unauthenticated requests
+// with 401, unlike RequireLogin which redirects browsers to the sign-in page.
+func (a *Auth) RequireVerifiedEmail() guard.Middleware {
+	return guard.RequireVerifiedEmail(a.Validators)
 }
 
 // Option configures Setup.

@@ -94,13 +94,10 @@ func main() {
 
 	// authMw: every authenticated route. Guardians of a chain compose, so the
 	// admin route extends the same middleware instead of re-declaring it.
-	authMw := guard.Chain(
-		a.Flow.RequireLogin(a.Validators),
-		guard.RequireVerifiedEmail(a.Validators),
-	)
+	authMw := a.RequireLogin()
 	adminMw := guard.Chain(authMw, guard.RequireAnyRole("admin"))
 
-	mux.Handle("/", guard.OptionalAuth(a.Validators)(http.HandlerFunc(handleHome)))
+	mux.Handle("/", a.OptionalAuth()(http.HandlerFunc(handleHome)))
 	mux.Handle("/private", authMw(http.HandlerFunc(handlePrivate)))
 	mux.Handle("/private/admin", adminMw(http.HandlerFunc(handleAdmin)))
 
