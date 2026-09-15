@@ -63,7 +63,7 @@ func (a *Auth) RequireLogin() guard.Middleware {
 	if a.Flow == nil {
 		return func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-				http.Error(w, "Not authorized", http.StatusUnauthorized)
+				http.Error(w, "no sign-in flow configured; issuer-only mode does not accept credentials", http.StatusUnauthorized)
 			})
 		}
 	}

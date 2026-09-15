@@ -45,7 +45,7 @@ func (f *Flow) RequireLogin(validators []guard.TokenValidator) guard.Middleware 
 				http.Redirect(w, r, nextURL, http.StatusFound)
 				return
 			}
-			http.Error(w, "Not authorized", http.StatusUnauthorized)
+			http.Error(w, "credentials required; non-GET requests cannot be redirected to sign-in", http.StatusUnauthorized)
 		})
 	}
 }
@@ -116,23 +116,23 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		if errParam := r.URL.Query().Get("error"); errParam != "" {
 			slog.Info("provider returned an error", "error", errParam)
-			http.Error(w, "Authorization failed", http.StatusUnauthorized)
+			http.Error(w, "provider authorization failed: "+errParam, http.StatusUnauthorized)
 			return
 		}
 
 		stateCookie, err := r.Cookie(stateCookieName)
 		if err != nil {
-			http.Error(w, "Invalid state", http.StatusUnauthorized)
+			http.Error(w, "missing state cookie", http.StatusUnauthorized)
 			return
 		}
 		decoded, err := base64.RawURLEncoding.DecodeString(stateCookie.Value)
 		if err != nil {
-			http.Error(w, "Invalid state", http.StatusUnauthorized)
+			http.Error(w, "invalid state cookie encoding", http.StatusUnauthorized)
 			return
 		}
 		var req loginRequest
 		if err := json.Unmarshal(decoded, &req); err != nil || req.State == "" || req.State != r.URL.Query().Get("state") {
-			http.Error(w, "Invalid state", http.StatusUnauthorized)
+			http.Error(w, "invalid or mismatched state", http.StatusUnauthorized)
 			return
 		}
 		f.clearStateCookie(w)
@@ -146,7 +146,7 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 		token, err := f.oauthConfig(p, r).Exchange(r.Context(), code, oauth2.SetAuthURLParam("code_verifier", req.Verifier))
 		if err != nil {
 			slog.Info("token exchange failed", "provider", p.Name, "error", err)
-			http.Error(w, "Token exchange failed", http.StatusUnauthorized)
+			http.Error(w, "token exchange failed with provider", http.StatusUnauthorized)
 			return
 		}
 		idToken, ok := token.Extra("id_token").(string)
@@ -158,7 +158,7 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 		user, err := p.Validator.ValidateToken(r.Context(), idToken)
 		if err != nil {
 			slog.Info("token validation failed", "provider", p.Name, "error", err)
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			http.Error(w, "token validation failed", http.StatusUnauthorized)
 			return
 		}
 
@@ -167,7 +167,7 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 		// replay across separate sign-ins.
 		if nonce, ok := idTokenNonce(idToken); !ok || nonce != req.Nonce {
 			slog.Info("token nonce mismatch", "provider", p.Name)
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			http.Error(w, "token nonce mismatch", http.StatusUnauthorized)
 			return
 		}
 
