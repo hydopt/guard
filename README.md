@@ -144,6 +144,33 @@ handler := guard.Chain(
 )(mux)
 ```
 
+### Protecting an entire tree
+
+Want every route behind the same middleware, including the sign-in flow itself?
+`auth.Setup` registers the flow on the mux you hand it, so serve that mux.
+`Flow.RequireLogin` (and `Auth.RequireLogin`) already lets the flow's own
+routes through, so the simplest whole-app protection is wrapping the whole mux:
+
+```go
+mux := http.NewServeMux()
+a, _ := auth.Setup(mux)
+mux.Handle("/", a.OptionalAuth()(home))
+a.RequireLogin()(mux)                  // /signin, /auth/*, logout stay reachable
+```
+
+For any *other* middleware (say a raw `guard.RequireVerifiedEmail` chain), keep
+the flow's routes open with `guard.SkipPaths` and the exact route list:
+
+```go
+mw := guard.SkipPaths(a.PublicRoutes(), guard.RequireVerifiedEmail(validators))
+handler := mw(mux)                     // only the sign-in flow is unguarded
+```
+
+`PublicRoutes()` lists the exact-match paths the flow owns: `/signin`, each
+provider's start and callback route, logout, and local endpoints (like the
+email/password login and token routes). The flow keeps working no matter which
+`guard.Middleware` protects the `?next=` return target.
+
 Further APIs (signin, guard.Issuer, credential stores, components) are
 documented in the package docs.
 

@@ -16,15 +16,26 @@ import (
 	"golang.org/x/oauth2"
 )
 
-// RequireLogin redirects requests without any credentials to the sign-in page
-// (with the original path as ?next=), so the browser can log in and be sent
-// back. Requests that carry credentials but fail validation still get a 401,
-// as do non-GET requests without credentials (a redirect would silently turn a
-// POST into a GET and lose the body).
+// RequireLogin guards a handler while keeping the flow's own routes open:
+// the sign-in page, provider start and callback routes, logout, and local
+// provider endpoints pass through unconditionally, so the flow works even when
+// it protects a whole tree. Other requests without credentials are redirected
+// to the sign-in page (with the original path as ?next=), so the browser can
+// log in and be sent back. Requests that carry credentials but fail validation
+// still get a 401, as do non-GET requests without credentials (a redirect would
+// silently turn a POST into a GET and lose the body).
 func (f *Flow) RequireLogin(validators []guard.TokenValidator) guard.Middleware {
 	auth := guard.RequireVerifiedEmail(validators)
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// The flow's own routes (sign-in page, provider start/callback,
+			// logout, local provider endpoints) must stay reachable so a
+			// browser can complete login even if the whole tree is guarded.
+			// Everything else needs valid credentials to proceed.
+			if f.isPublicPath(r.URL.Path) {
+				next.ServeHTTP(w, r)
+				return
+			}
 			if f.hasCredentials(r) {
 				auth(next).ServeHTTP(w, r)
 				return
@@ -56,7 +67,7 @@ func (f *Flow) Register(mux *http.ServeMux) {
 		mux.HandleFunc(p.StartPath, f.handleStart(p))
 		mux.HandleFunc(p.CallbackPath, f.handleCallback(p))
 	}
-	mux.HandleFunc("/auth/logout", f.handleLogout)
+	mux.HandleFunc(logoutPath, f.handleLogout)
 }
 
 func (f *Flow) handleSignIn(w http.ResponseWriter, r *http.Request) {

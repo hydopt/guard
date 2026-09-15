@@ -637,3 +637,91 @@ func TestFlow_DefaultPaths(t *testing.T) {
 	assert.Equal(t, "/", flow.homePath)
 	assert.Equal(t, "/signin", flow.signInPath)
 }
+
+func TestFlow_PublicRoutes(t *testing.T) {
+	oauth := newFakeOAuthServer(t, nil)
+	flow, err := New(Config{Providers: []Provider{provider(oauth, fakeValidator{})}})
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"/auth/logout",
+		"/auth/test",
+		"/auth/test/callback",
+		"/signin",
+	}, flow.PublicRoutes())
+}
+
+func TestFlow_PublicRoutesIncludesLocalProviderEndpoints(t *testing.T) {
+	flow, err := New(Config{Providers: []Provider{{
+		Name:     "basic-auth",
+		Label:    "Basic Auth",
+		ClientID: "basic-auth",
+		Endpoint: oauth2.Endpoint{
+			AuthURL:  "/auth/basic-auth/authorize",
+			TokenURL: "/auth/basic-auth/token",
+		},
+		Validator: fakeValidator{},
+	}}})
+	require.NoError(t, err)
+	assert.Equal(t, []string{
+		"/auth/basic-auth",
+		"/auth/basic-auth/authorize",
+		"/auth/basic-auth/callback",
+		"/auth/basic-auth/token",
+		"/auth/logout",
+		"/signin",
+	}, flow.PublicRoutes())
+}
+
+func TestFlow_RequireLoginWrapsWholeMux(t *testing.T) {
+	oauth := newFakeOAuthServer(t, nil)
+	flow, err := New(Config{Providers: []Provider{provider(oauth, fakeValidator{})}})
+	require.NoError(t, err)
+
+	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := guard.MustGetUserFromCtx(r.Context())
+		_, _ = w.Write([]byte(user.Email))
+	})
+
+	mux := http.NewServeMux()
+	flow.Register(mux)
+	mux.Handle("/private", flow.RequireLogin(
+		[]guard.TokenValidator{fakeValidator{}},
+	)(protected))
+
+	// Guard the entire tree — including the flow's own routes — with the
+	// same RequireLogin middleware.
+	server := httptest.NewServer(flow.RequireLogin([]guard.TokenValidator{fakeValidator{}})(mux))
+	t.Cleanup(server.Close)
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	t.Run("signInPageStaysReachable", func(t *testing.T) {
+		resp := get(t, client, server.URL+"/signin?next=%2Fprivate")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Contains(t, readBody(t, resp), `href="/auth/test?next=%2Fprivate"`)
+	})
+
+	t.Run("providerStartStaysReachable", func(t *testing.T) {
+		resp := get(t, client, server.URL+"/auth/test?next=%2Fprivate")
+		require.Equal(t, http.StatusFound, resp.StatusCode)
+		assert.Contains(t, resp.Header.Get("Location"), "/authorize")
+	})
+
+	t.Run("fullLoginReturnsToProtectedNext", func(t *testing.T) {
+		target := completeLogin(t, client, server, "/private")
+		require.Equal(t, "/private", target)
+		assert.NotEmpty(t, sessionCookie(client.Jar, serverURL, guard.SessionCookieName))
+
+		resp := get(t, client, server.URL+"/private")
+		require.Equal(t, http.StatusOK, resp.StatusCode)
+		assert.Equal(t, "someone@example.com", readBody(t, resp))
+	})
+}

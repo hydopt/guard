@@ -340,6 +340,28 @@ func TestSetupIssuerOnly(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 }
 
+func TestSetupPublicRoutes(t *testing.T) {
+	_, a := newTestMux(t,
+		Issuer(testOrigin),
+		Google("google-client"),
+		Microsoft("microsoft-client"),
+		WithValidator(googleProvider, fakeValidator{}),
+		WithValidator(microsoftProvider, fakeValidator{}),
+	)
+	assert.Equal(t, []string{
+		"/auth/google",
+		"/auth/google/callback",
+		"/auth/logout",
+		"/auth/microsoft",
+		"/auth/microsoft/callback",
+		"/signin",
+	}, a.PublicRoutes())
+
+	// Issuer-only setups have no flow, so no public routes.
+	_, issuerOnly := newTestMux(t, Issuer(testOrigin))
+	assert.Nil(t, issuerOnly.PublicRoutes())
+}
+
 func TestSetupEmailPassword(t *testing.T) {
 	store := guard.NewInMemoryCredentialStore(map[string]string{"alice@example.com": "s3cret"})
 	mux, a := newTestMux(t,

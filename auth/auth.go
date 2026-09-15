@@ -82,6 +82,19 @@ func (a *Auth) RequireVerifiedEmail() guard.Middleware {
 	return guard.RequireVerifiedEmail(a.Validators)
 }
 
+// PublicRoutes returns the exact-match paths the sign-in flow owns and must
+// stay reachable for a browser to complete login (/signin, the provider start
+// and callback routes, logout, and local provider endpoints). Wrap the rest of
+// the app with any guard middleware while keeping the flow alive:
+//
+//	mw := guard.SkipPaths(a.PublicRoutes(), a.RequireLogin())
+func (a *Auth) PublicRoutes() []string {
+	if a.Flow == nil {
+		return nil
+	}
+	return a.Flow.PublicRoutes()
+}
+
 // Option configures Setup.
 type Option func(*config)
 

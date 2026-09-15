@@ -18,6 +18,29 @@ func Chain(ms ...Middleware) Middleware {
 	}
 }
 
+// SkipPaths runs mw for every request except those whose URL path is in the
+// exact-match exempt list, which pass straight through to next. This lets one
+// guard middleware protect all routes while keeping a pinned set of paths
+// (like a sign-in flow's own routes) reachable without credentials:
+//
+//	mw := guard.SkipPaths(flow.PublicRoutes(), guard.RequireVerifiedEmail(validators))
+func SkipPaths(paths []string, mw Middleware) Middleware {
+	exempt := make(map[string]struct{}, len(paths))
+	for _, p := range paths {
+		exempt[p] = struct{}{}
+	}
+	return func(next http.Handler) http.Handler {
+		guarded := mw(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := exempt[r.URL.Path]; ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+			guarded.ServeHTTP(w, r)
+		})
+	}
+}
+
 type userCtxKey string
 
 const userKey userCtxKey = "user"
