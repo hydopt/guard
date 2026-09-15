@@ -5,6 +5,7 @@ import (
 	"log/slog"
 	"net/http"
 	"slices"
+	"strings"
 )
 
 type Middleware func(http.Handler) http.Handler
@@ -62,17 +63,17 @@ func RequireVerifiedEmail(validators []TokenValidator) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
-				token, err := getAuthToken(r)
-				if err != nil {
-					http.Error(w, "Not authorized", http.StatusUnauthorized)
-					return
-				}
+			token, err := getAuthToken(r)
+			if err != nil {
+				http.Error(w, "missing or invalid credentials", http.StatusUnauthorized)
+				return
+			}
 
-				user, err := authenticateUser(r.Context(), token, validators)
-				if err != nil {
-					http.Error(w, "Not authorized", http.StatusUnauthorized)
-					return
-				}
+			user, err := authenticateUser(r.Context(), token, validators)
+			if err != nil {
+				http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+				return
+			}
 
 				ctx := context.WithValue(r.Context(), userKey, user)
 				ctx = context.WithValue(ctx, tokenKey, token)
@@ -96,9 +97,9 @@ func RequireAnyRole(required ...string) Middleware {
 						return
 					}
 				}
-				slog.Info("Insufficient privileges", "email", user.Email)
-				http.Error(w, "Forbidden", http.StatusForbidden)
-			})
+			slog.Info("Insufficient privileges", "email", user.Email)
+			http.Error(w, "insufficient roles: requires one of "+strings.Join(required, ", "), http.StatusForbidden)
+		})
 	}
 }
 
@@ -114,7 +115,7 @@ func RequireAllRoles(required ...string) Middleware {
 				for _, want := range required {
 					if !slices.Contains(user.Roles, want) {
 						slog.Info("Insufficient privileges", "email", user.Email)
-						http.Error(w, "Forbidden", http.StatusForbidden)
+						http.Error(w, "insufficient roles: requires "+strings.Join(required, ", "), http.StatusForbidden)
 						return
 					}
 				}
@@ -151,8 +152,8 @@ func RequireWhiteListedEmail(whitelist []string) Middleware {
 		return http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
 				user := MustGetUserFromCtx(r.Context())
-				if !slices.Contains(whitelist, user.Email) {
-					http.Error(w, "Forbidden", http.StatusForbidden)
+			if !slices.Contains(whitelist, user.Email) {
+				http.Error(w, "email not authorized", http.StatusForbidden)
 					return
 				}
 				next.ServeHTTP(w, r)

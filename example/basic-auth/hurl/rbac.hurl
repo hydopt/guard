@@ -40,4 +40,4 @@ body contains "bob@example.com"
 GET {{base_url}}/private/admin
 HTTP 403
 [Asserts]
-body contains "Forbidden"
+body contains "insufficient roles"
