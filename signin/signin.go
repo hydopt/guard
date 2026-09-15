@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,6 +16,10 @@ const (
 	defaultSessionTTL = time.Hour
 	stateCookieName   = "signin_state"
 	stateTTL          = 10 * time.Minute
+
+	// logoutPath is the logout route registered by Register. It is part of the
+	// flow's own public surface, so guarded apps never block it.
+	logoutPath = "/auth/logout"
 )
 
 type Config struct {
@@ -49,6 +54,10 @@ type Flow struct {
 	secure     bool
 	homePath   string
 	signInPath string
+	// public holds the exact-match request paths the flow owns. These must
+	// stay reachable for a browser to complete sign-in, even when the host
+	// app guards the whole request tree with a Middleware.
+	public map[string]struct{}
 }
 
 func New(cfg Config) (*Flow, error) {
@@ -108,6 +117,7 @@ func New(cfg Config) (*Flow, error) {
 		f.order = append(f.order, p.Name)
 	}
 
+	f.public = f.buildPublicRoutes()
 	return f, nil
 }
 
@@ -169,3 +179,44 @@ func (f *Flow) HomePath() string { return f.homePath }
 
 // SignInPath returns the sign-in page route.
 func (f *Flow) SignInPath() string { return f.signInPath }
+
+// PublicRoutes lists the exact-match request paths the flow owns and must stay
+// reachable for a browser to complete login: the sign-in page, logout, each
+// provider's start and callback route, and any provider endpoints served
+// locally (relative AuthURL/TokenURL such as the basic-auth authorize and
+// token routes). Guarded apps keep these open with guard.SkipPaths.
+func (f *Flow) PublicRoutes() []string {
+	out := make([]string, 0, len(f.public))
+	for p := range f.public {
+		out = append(out, p)
+	}
+	sort.Strings(out)
+	return out
+}
+
+// isPublicPath reports whether the exact request path is one of the flow's
+// own routes.
+func (f *Flow) isPublicPath(path string) bool {
+	_, ok := f.public[path]
+	return ok
+}
+
+// buildPublicRoutes collects the routes the flow must stay reachable at.
+func (f *Flow) buildPublicRoutes() map[string]struct{} {
+	set := map[string]struct{}{
+		f.signInPath: {},
+		logoutPath:   {},
+	}
+	for _, name := range f.order {
+		p := f.providers[name]
+		set[p.StartPath] = struct{}{}
+		set[p.CallbackPath] = struct{}{}
+		if strings.HasPrefix(p.Endpoint.AuthURL, "/") {
+			set[p.Endpoint.AuthURL] = struct{}{}
+		}
+		if strings.HasPrefix(p.Endpoint.TokenURL, "/") {
+			set[p.Endpoint.TokenURL] = struct{}{}
+		}
+	}
+	return set
+}

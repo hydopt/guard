@@ -62,6 +62,43 @@ func TestChainOrder(t *testing.T) {
 	require.Equal(t, []string{"m1", "m2", "handler"}, order)
 }
 
+func TestSkipPathsExemptsMatchingPaths(t *testing.T) {
+	called := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	validator := &mockTokenValidator{err: ErrUnauthorized}
+	mw := SkipPaths([]string{"/signin", "/auth/callback"}, RequireVerifiedEmail([]TokenValidator{validator}))
+
+	req := httptest.NewRequest(http.MethodGet, "/signin", nil)
+	rec := httptest.NewRecorder()
+	mw(handler).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.True(t, called, "exempt paths must reach the handler without credentials")
+}
+
+func TestSkipPathsGuardsEverythingElse(t *testing.T) {
+	called := false
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusOK)
+	})
+
+	validator := &mockTokenValidator{err: ErrUnauthorized}
+	mw := SkipPaths([]string{"/signin"}, RequireVerifiedEmail([]TokenValidator{validator}))
+
+	req := httptest.NewRequest(http.MethodGet, "/private", nil)
+	req.Header.Set("Authorization", "Bearer invalid-token")
+	rec := httptest.NewRecorder()
+	mw(handler).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	assert.False(t, called)
+}
+
 func TestRequireVerifiedEmailRejectsUnauthorized(t *testing.T) {
 	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)

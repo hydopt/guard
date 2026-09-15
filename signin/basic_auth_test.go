@@ -151,6 +151,73 @@ func TestBasicAuth_CompleteLogin(t *testing.T) {
 	assert.Equal(t, "alice@example.com", readBody(t, resp))
 }
 
+func TestBasicAuth_RequireLoginWrapsWholeMux(t *testing.T) {
+	issuer, err := guard.NewIssuer(guard.IssuerConfig{
+		Issuer: "https://auth.example.test",
+	})
+	require.NoError(t, err)
+	store := guard.NewInMemoryCredentialStore(map[string]string{
+		"alice@example.com": "s3cret",
+	})
+	baProvider := NewBasicAuthProvider(issuer, store)
+
+	flow, err := New(Config{Providers: []Provider{{
+		Name:              "basic-auth",
+		Label:             "Basic Auth",
+		ClientID:          "basic-auth",
+		Endpoint:          oauth2.Endpoint{AuthURL: baProvider.AuthorizePath(), TokenURL: baProvider.TokenPath()},
+		Scopes:            []string{"openid", "email"},
+		SignsSessionToken: true,
+		Validator:         issuer,
+	}}})
+	require.NoError(t, err)
+
+	protected := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		user := guard.MustGetUserFromCtx(r.Context())
+		_, _ = w.Write([]byte(user.Email))
+	})
+
+	mux := http.NewServeMux()
+	baProvider.Register(mux)
+	flow.Register(mux)
+	mux.Handle("/private", guard.RequireVerifiedEmail([]guard.TokenValidator{issuer})(protected))
+
+	// Protect the entire tree — including the flow's own routes — with the
+	// same RequireLogin middleware.
+	server := httptest.NewServer(flow.RequireLogin([]guard.TokenValidator{issuer})(mux))
+	t.Cleanup(server.Close)
+	serverURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+	jar, err := cookiejar.New(nil)
+	require.NoError(t, err)
+	client := &http.Client{
+		Jar: jar,
+		CheckRedirect: func(_ *http.Request, _ []*http.Request) error {
+			return http.ErrUseLastResponse
+		},
+	}
+
+	// The local login form stays reachable despite the whole-tree guard.
+	authorizeURL, form := startBasicAuthLogin(t, client, server)
+	resp := submitLogin(t, client, authorizeURL, form, "alice@example.com", "s3cret")
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+
+	callback, err := url.Parse(resp.Header.Get("Location"))
+	require.NoError(t, err)
+	require.Equal(t, "/auth/basic-auth/callback", callback.Path)
+
+	// The callback exchanges the code at the local token endpoint, which the
+	// guard must let through too.
+	resp = get(t, client, callback.String())
+	require.Equal(t, http.StatusFound, resp.StatusCode)
+	require.Equal(t, "/", resp.Header.Get("Location"))
+	assert.NotEmpty(t, sessionCookie(client.Jar, serverURL, guard.SessionCookieName))
+
+	resp = get(t, client, server.URL+"/private")
+	require.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, "alice@example.com", readBody(t, resp))
+}
+
 func TestBasicAuth_WrongPassword(t *testing.T) {
 	server, client, _, _ := newBasicAuthServer(t)
 
