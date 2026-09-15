@@ -643,6 +643,7 @@ func TestFlow_PublicRoutes(t *testing.T) {
 	flow, err := New(Config{Providers: []Provider{provider(oauth, fakeValidator{})}})
 	require.NoError(t, err)
 	assert.Equal(t, []string{
+		"/.well-known/jwks.json",
 		"/auth/logout",
 		"/auth/test",
 		"/auth/test/callback",
@@ -663,6 +664,7 @@ func TestFlow_PublicRoutesIncludesLocalProviderEndpoints(t *testing.T) {
 	}}})
 	require.NoError(t, err)
 	assert.Equal(t, []string{
+		"/.well-known/jwks.json",
 		"/auth/basic-auth",
 		"/auth/basic-auth/authorize",
 		"/auth/basic-auth/callback",

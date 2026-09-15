@@ -204,8 +204,9 @@ func (f *Flow) isPublicPath(path string) bool {
 // buildPublicRoutes collects the routes the flow must stay reachable at.
 func (f *Flow) buildPublicRoutes() map[string]struct{} {
 	set := map[string]struct{}{
-		f.signInPath: {},
-		logoutPath:   {},
+		guard.JWKSPath: {},
+		f.signInPath:   {},
+		logoutPath:     {},
 	}
 	for _, name := range f.order {
 		p := f.providers[name]
