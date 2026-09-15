@@ -349,6 +349,7 @@ func TestSetupPublicRoutes(t *testing.T) {
 		WithValidator(microsoftProvider, fakeValidator{}),
 	)
 	assert.Equal(t, []string{
+		"/.well-known/jwks.json",
 		"/auth/google",
 		"/auth/google/callback",
 		"/auth/logout",
