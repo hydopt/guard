@@ -68,7 +68,7 @@ func newFakeOAuthServer(t *testing.T, issuedToken func(nonce string) string) *ht
 		q.Set("code", base64.RawURLEncoding.EncodeToString([]byte(nonce)))
 		q.Set("state", r.URL.Query().Get("state"))
 		redirectURI.RawQuery = q.Encode()
-		http.Redirect(w, r, redirectURI.String(), http.StatusFound)
+		guard.Redirect(w, r, redirectURI.String(), http.StatusFound)
 	})
 	mux.HandleFunc("/token", func(w http.ResponseWriter, r *http.Request) {
 		if err := r.ParseForm(); err != nil {

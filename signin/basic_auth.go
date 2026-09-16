@@ -165,7 +165,7 @@ func (p *BasicAuthProvider) processLogin(w http.ResponseWriter, r *http.Request)
 	q.Set("code", code)
 	q.Set("state", r.Form.Get("state"))
 	u.RawQuery = q.Encode()
-	http.Redirect(w, r, u.String(), http.StatusFound)
+	guard.Redirect(w, r, u.String(), http.StatusFound)
 }
 
 func (p *BasicAuthProvider) renderLoginError(w http.ResponseWriter, r *http.Request, hidden []components.HiddenField, msg, email string) {
