@@ -42,7 +42,7 @@ func (f *Flow) RequireLogin(validators []guard.TokenValidator) guard.Middleware 
 			}
 			if r.Method == http.MethodGet || r.Method == http.MethodHead {
 				nextURL := f.signInPath + "?next=" + url.QueryEscape(r.URL.RequestURI())
-				http.Redirect(w, r, nextURL, http.StatusFound)
+				guard.Redirect(w, r, nextURL, http.StatusFound)
 				return
 			}
 			http.Error(w, "credentials required; non-GET requests cannot be redirected to sign-in", http.StatusUnauthorized)
@@ -102,7 +102,7 @@ func (f *Flow) handleStart(p *Provider) http.HandlerFunc {
 		}
 		next := safeRedirect(r.URL.Query().Get("next"), f.homePath)
 		f.writeStateCookie(w, loginRequest{State: state, Next: next, Verifier: verifier, Nonce: nonce})
-		http.Redirect(w, r, f.oauthConfig(p, r).AuthCodeURL(
+		guard.Redirect(w, r, f.oauthConfig(p, r).AuthCodeURL(
 			state,
 			oauth2.AccessTypeOnline,
 			oauth2.SetAuthURLParam("nonce", nonce),
@@ -184,7 +184,7 @@ func (f *Flow) handleCallback(p *Provider) http.HandlerFunc {
 		}
 
 		f.writeSessionCookie(w, sessionToken, ttl)
-		http.Redirect(w, r, req.Next, http.StatusFound)
+		guard.Redirect(w, r, req.Next, http.StatusFound)
 	}
 }
 
@@ -238,11 +238,11 @@ func (f *Flow) handleLogout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if _, err := r.Cookie(f.cookieName); err != nil {
-		http.Redirect(w, r, f.homePath, http.StatusFound)
+		guard.Redirect(w, r, f.homePath, http.StatusFound)
 		return
 	}
 	f.clearSessionCookie(w)
-	http.Redirect(w, r, f.homePath, http.StatusFound)
+	guard.Redirect(w, r, f.homePath, http.StatusFound)
 }
 
 // writeTokenResponse reports the token together with its remaining lifetime.
