@@ -116,7 +116,7 @@ a, err := auth.Setup(mux,
 ```go
 import "github.com/hydopt/guard/sqlstore"
 
-db, _ := sql.Open("postgres", connStr)
+db, _ := sql.Open("pgx", connStr)
 store := sqlstore.NewStore(db, "users", "user_roles")
 if err := store.Migrate(ctx); err != nil { /* handle */ }
 a, err := auth.Setup(mux,
@@ -124,6 +124,13 @@ a, err := auth.Setup(mux,
     auth.WithRoleStore(store),
 )
 ```
+
+  `NewStore` picks the SQL dialect from the driver — postgres gets `$1`
+  placeholders and a `BYTEA` hash column, everyone else gets `?` and `BLOB` —
+  so the same code serves both. If you front the driver in something that
+  hides it, say so with `sqlstore.NewPostgresStore`. Table names go to the
+  server unqualified, so on postgres they resolve against the connection's
+  `search_path`.
 
 ## Validation and middleware
 

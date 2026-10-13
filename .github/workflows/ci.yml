@@ -63,6 +63,6 @@ jobs:
           go-version: "1.27"
       - run: go mod tidy
         working-directory: sqlstore
-      - name: Test sqlstore with in-memory sqlite
-        run: go test ./...
+      - name: Test sqlstore against sqlite and postgres 18
+        run: go test -race ./...
         working-directory: sqlstore
