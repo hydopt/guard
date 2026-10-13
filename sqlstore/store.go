@@ -160,3 +160,21 @@ func (s *Store) RolesByEmail(ctx context.Context, email string) ([]string, error
 	}
 	return roles, nil
 }
+
+func (s *Store) Roles(ctx context.Context) (map[string][]string, error) {
+	rows, err := s.db.QueryContext(ctx, "SELECT email, role FROM "+s.rolesTable)
+	if err != nil {
+		return nil, fmt.Errorf("sqlstore: roles: %w", err)
+	}
+	defer rows.Close()
+	result := make(map[string][]string)
+	for rows.Next() {
+		var role, email string
+		if err := rows.Scan(&email, &role); err != nil {
+			return result, fmt.Errorf("sqlstore: roles: %w", err)
+		}
+		current := result[email]
+		result[email] = append(current, role)
+	}
+	return result, rows.Err()
+}
