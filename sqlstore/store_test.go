@@ -14,7 +14,7 @@ import (
 	_ "modernc.org/sqlite"
 )
 
-func newStore(t *testing.T) *Store {
+func newSQLiteStore(t *testing.T) *Store {
 	t.Helper()
 	db, err := sql.Open("sqlite", ":memory:")
 	require.NoError(t, err)
@@ -28,45 +28,87 @@ func newStore(t *testing.T) *Store {
 	return store
 }
 
-func TestStore_Authenticate(t *testing.T) {
-	s := newStore(t)
-	ctx := t.Context()
-
-	require.NoError(t, s.SetUser(ctx, "alice@example.com", "password", "admin", "user"))
-
-	assert.NoError(t, s.Authenticate(ctx, "alice@example.com", "password"))
-	assert.ErrorIs(t, s.Authenticate(ctx, "alice@example.com", "wrong-password"), guard.ErrUnauthorized)
-	assert.ErrorIs(t, s.Authenticate(ctx, "unknown@example.com", "password"), guard.ErrUnauthorized)
+func TestStore_SQLite(t *testing.T) {
+	storeSuite(t, newSQLiteStore)
 }
 
-func TestStore_RolesByEmail(t *testing.T) {
-	s := newStore(t)
-	ctx := t.Context()
+// storeSuite runs the behaviors every supported driver must show. Each case
+// builds its own store, so cases never share rows.
+func storeSuite(t *testing.T, newStore func(*testing.T) *Store) {
+	t.Helper()
 
-	require.NoError(t, s.SetUser(ctx, "alice@example.com", "password", "admin", "user"))
+	t.Run("Authenticate", func(t *testing.T) {
+		s := newStore(t)
+		ctx := t.Context()
 
-	roles, err := s.RolesByEmail(ctx, "alice@example.com")
-	require.NoError(t, err)
-	assert.Equal(t, []string{"admin", "user"}, roles)
+		require.NoError(t, s.SetUser(ctx, "alice@example.com", "password", "admin", "user"))
 
-	roles, err = s.RolesByEmail(ctx, "unknown@example.com")
-	require.NoError(t, err)
-	assert.Empty(t, roles)
-}
+		assert.NoError(t, s.Authenticate(ctx, "alice@example.com", "password"))
+		assert.ErrorIs(t, s.Authenticate(ctx, "alice@example.com", "wrong-password"), guard.ErrUnauthorized)
+		assert.ErrorIs(t, s.Authenticate(ctx, "unknown@example.com", "password"), guard.ErrUnauthorized)
+	})
 
-func TestStore_SetUserReplacesRoles(t *testing.T) {
-	s := newStore(t)
-	ctx := t.Context()
+	t.Run("RolesByEmail", func(t *testing.T) {
+		s := newStore(t)
+		ctx := t.Context()
 
-	require.NoError(t, s.SetUser(ctx, "alice@example.com", "first", "admin", "user"))
-	require.NoError(t, s.SetUser(ctx, "alice@example.com", "second", "editor"))
+		require.NoError(t, s.SetUser(ctx, "alice@example.com", "password", "admin", "user"))
 
-	assert.NoError(t, s.Authenticate(ctx, "alice@example.com", "second"))
-	assert.ErrorIs(t, s.Authenticate(ctx, "alice@example.com", "first"), guard.ErrUnauthorized)
+		roles, err := s.RolesByEmail(ctx, "alice@example.com")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"admin", "user"}, roles)
 
-	roles, err := s.RolesByEmail(ctx, "alice@example.com")
-	require.NoError(t, err)
-	assert.Equal(t, []string{"editor"}, roles)
+		roles, err = s.RolesByEmail(ctx, "unknown@example.com")
+		require.NoError(t, err)
+		assert.Empty(t, roles)
+	})
+
+	t.Run("SetUserReplacesRoles", func(t *testing.T) {
+		s := newStore(t)
+		ctx := t.Context()
+
+		require.NoError(t, s.SetUser(ctx, "alice@example.com", "first", "admin", "user"))
+		require.NoError(t, s.SetUser(ctx, "alice@example.com", "second", "editor"))
+
+		assert.NoError(t, s.Authenticate(ctx, "alice@example.com", "second"))
+		assert.ErrorIs(t, s.Authenticate(ctx, "alice@example.com", "first"), guard.ErrUnauthorized)
+
+		roles, err := s.RolesByEmail(ctx, "alice@example.com")
+		require.NoError(t, err)
+		assert.Equal(t, []string{"editor"}, roles)
+	})
+
+	t.Run("AuthSetupEndToEnd", func(t *testing.T) {
+		s := newStore(t)
+		require.NoError(t, s.SetUser(t.Context(), "alice@example.com", "password", "admin", "user"))
+
+		mux := http.NewServeMux()
+		a, err := auth.Setup(mux,
+			auth.Issuer("https://auth.example.test"),
+			auth.EmailPassword(s),
+			auth.WithRoleStore(s),
+		)
+		require.NoError(t, err)
+
+		token, err := a.Issuer.SignToken("alice@example.com", time.Hour)
+		require.NoError(t, err)
+		user, err := a.Issuer.ValidateToken(t.Context(), token)
+		require.NoError(t, err)
+		assert.Equal(t, "alice@example.com", user.Email)
+		assert.Equal(t, []string{"admin", "user"}, user.Roles)
+	})
+
+	t.Run("Roles", func(t *testing.T) {
+		s := newStore(t)
+		ctx := t.Context()
+		require.NoError(t, s.SetUser(ctx, "alice@example.com", "first", "admin", "user"))
+		roles, err := s.Roles(ctx)
+		require.NoError(t, err)
+		require.Len(t, roles, 1)
+		aliceRoles := roles["alice@example.com"]
+		slices.Sort(aliceRoles)
+		require.Equal(t, []string{"admin", "user"}, aliceRoles)
+	})
 }
 
 func TestStore_ImplementsInterfaces(t *testing.T) {
@@ -75,35 +117,17 @@ func TestStore_ImplementsInterfaces(t *testing.T) {
 	var _ guard.RoleStore = s
 }
 
-func TestStore_AuthSetupEndToEnd(t *testing.T) {
-	s := newStore(t)
-	require.NoError(t, s.SetUser(t.Context(), "alice@example.com", "password", "admin", "user"))
+func TestRebind(t *testing.T) {
+	questionMarks := "SELECT role FROM user_roles WHERE email = ? ORDER BY role"
+	assert.Equal(t, questionMarks, rebind(questionMarks, DialectQuestionMark))
 
-	mux := http.NewServeMux()
-	a, err := auth.Setup(mux,
-		auth.Issuer("https://auth.example.test"),
-		auth.EmailPassword(s),
-		auth.WithRoleStore(s),
-	)
-	require.NoError(t, err)
+	assert.Equal(t,
+		"SELECT role FROM user_roles WHERE email = $1 ORDER BY role",
+		rebind(questionMarks, DialectPostgres))
 
-	token, err := a.Issuer.SignToken("alice@example.com", time.Hour)
-	require.NoError(t, err)
-	user, err := a.Issuer.ValidateToken(t.Context(), token)
-	require.NoError(t, err)
-	assert.Equal(t, "alice@example.com", user.Email)
-	assert.Equal(t, []string{"admin", "user"}, user.Roles)
-}
-
-func TestStore_TestRoles(t *testing.T) {
-	s := newStore(t)
-	ctx := t.Context()
-	require.NoError(t, s.SetUser(ctx, "alice@example.com", "first", "admin", "user"))
-	roles, err := s.Roles(ctx)
-	require.NoError(t, err)
-	require.Len(t, roles, 1)
-	aliceRoles := roles["alice@example.com"]
-	slices.Sort(aliceRoles)
-	require.Equal(t, []string{"admin", "user"}, aliceRoles)
-
+	// Numbering follows the placeholders, not the characters around them, and
+	// literals are left alone so a '?' inside one is not rewritten.
+	assert.Equal(t,
+		"SELECT email, role FROM user_roles WHERE role <> '? maybe' AND role <> $1 AND email = $2",
+		rebind("SELECT email, role FROM user_roles WHERE role <> '? maybe' AND role <> ? AND email = ?", DialectPostgres))
 }
