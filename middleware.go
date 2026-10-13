@@ -63,17 +63,17 @@ func RequireVerifiedEmail(validators []TokenValidator) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
-			token, err := getAuthToken(r)
-			if err != nil {
-				http.Error(w, "missing or invalid credentials", http.StatusUnauthorized)
-				return
-			}
+				token, err := getAuthToken(r)
+				if err != nil {
+					http.Error(w, "missing or invalid credentials", http.StatusUnauthorized)
+					return
+				}
 
-			user, err := authenticateUser(r.Context(), token, validators)
-			if err != nil {
-				http.Error(w, "invalid or expired token", http.StatusUnauthorized)
-				return
-			}
+				user, err := authenticateUser(r.Context(), token, validators)
+				if err != nil {
+					http.Error(w, "invalid or expired token", http.StatusUnauthorized)
+					return
+				}
 
 				ctx := context.WithValue(r.Context(), userKey, user)
 				ctx = context.WithValue(ctx, tokenKey, token)
@@ -97,9 +97,9 @@ func RequireAnyRole(required ...string) Middleware {
 						return
 					}
 				}
-			slog.Info("Insufficient privileges", "email", user.Email)
-			http.Error(w, "insufficient roles: requires one of "+strings.Join(required, ", "), http.StatusForbidden)
-		})
+				slog.Info("Insufficient privileges", "email", user.Email)
+				http.Error(w, "insufficient roles: requires one of "+strings.Join(required, ", "), http.StatusForbidden)
+			})
 	}
 }
 
@@ -124,12 +124,16 @@ func RequireAllRoles(required ...string) Middleware {
 	}
 }
 
-// EnrichFromStore replaces the roles on the authenticated user with the roles
-// resolved from the given RoleStore at request time. This ensures the user's
-// roles reflect the current state of the store rather than the (potentially
-// stale) roles embedded in the token. On store errors the roles are cleared
-// and the request continues (fail-open). Requires RequireVerifiedEmail (or
-// equivalent) earlier in the chain.
+// EnrichFromStore appends the roles on the authenticated user with the roles
+// resolved from the given RoleStore at request time. The result is the union
+// of the token's roles and the store's, sorted and deduplicated, so the
+// middleware can be chained over several stores.
+//
+// Roles come from the token claims, which may be empty: an application can
+// use guard purely as an OIDC provider and layer its own role stores on top.
+// Requires RequireVerifiedEmail (or equivalent) earlier in the chain. On store
+// errors the roles already on the user are kept and the request continues
+// (fail-open).
 func EnrichFromStore(store RoleStore) Middleware {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(
@@ -138,13 +142,21 @@ func EnrichFromStore(store RoleStore) Middleware {
 				roles, err := store.RolesByEmail(r.Context(), user.Email)
 				if err != nil {
 					slog.Error("enrich roles: store lookup failed", "email", user.Email, "error", err)
-					user.Roles = []string{}
 				} else {
-					user.Roles = roles
+					user.Roles = mergeRoles(user.Roles, roles)
 				}
 				next.ServeHTTP(w, r)
 			})
 	}
+}
+
+// mergeRoles returns the union of existing and incoming roles, sorted and
+// deduplicated. Both inputs are cloned before sorting, so neither the token's
+// role slice nor the store's own slice is reordered in place.
+func mergeRoles(existing, incoming []string) []string {
+	merged := append(slices.Clone(existing), incoming...)
+	slices.Sort(merged)
+	return slices.Compact(merged)
 }
 
 func RequireWhiteListedEmail(whitelist []string) Middleware {
@@ -152,8 +164,8 @@ func RequireWhiteListedEmail(whitelist []string) Middleware {
 		return http.HandlerFunc(
 			func(w http.ResponseWriter, r *http.Request) {
 				user := MustGetUserFromCtx(r.Context())
-			if !slices.Contains(whitelist, user.Email) {
-				http.Error(w, "email not authorized", http.StatusForbidden)
+				if !slices.Contains(whitelist, user.Email) {
+					http.Error(w, "email not authorized", http.StatusForbidden)
 					return
 				}
 				next.ServeHTTP(w, r)

@@ -343,7 +343,7 @@ func (e errRoleStore) RolesByEmail(_ context.Context, _ string) ([]string, error
 	return nil, e.err
 }
 
-func TestEnrichFromStoreOverwritesRoles(t *testing.T) {
+func TestEnrichFromStoreAppendsRoles(t *testing.T) {
 	user := &User{Email: "alice@example.com", Roles: []string{"stale"}}
 	store := InMemoryRoleStore{"alice@example.com": {"admin", "editor"}}
 
@@ -360,10 +360,54 @@ func TestEnrichFromStoreOverwritesRoles(t *testing.T) {
 	mw(handler).ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Equal(t, []string{"admin", "editor"}, gotRoles)
+	require.Equal(t, []string{"admin", "editor", "stale"}, gotRoles)
 }
 
-func TestEnrichFromStoreClearsOnStoreError(t *testing.T) {
+// A guard issuer without a role system mints tokens with no role claims at
+// all; the store alone decides what the user may do.
+func TestEnrichFromStoreAddsRolesToRolelessUser(t *testing.T) {
+	user := &User{Email: "alice@example.com"}
+	store := InMemoryRoleStore{"alice@example.com": {"admin"}}
+
+	var gotRoles []string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRoles = MustGetUserFromCtx(r.Context()).Roles
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := Chain(withUser(user), EnrichFromStore(store))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	mw(handler).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, []string{"admin"}, gotRoles)
+}
+
+// Chaining stores unions their roles; overlapping roles appear once.
+func TestEnrichFromStoreChainsStores(t *testing.T) {
+	user := &User{Email: "alice@example.com", Roles: []string{"viewer"}}
+	storeA := InMemoryRoleStore{"alice@example.com": {"admin", "editor"}}
+	storeB := InMemoryRoleStore{"alice@example.com": {"editor", "auditor"}}
+
+	var gotRoles []string
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		gotRoles = MustGetUserFromCtx(r.Context()).Roles
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := Chain(withUser(user), EnrichFromStore(storeA), EnrichFromStore(storeB))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	mw(handler).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, []string{"admin", "auditor", "editor", "viewer"}, gotRoles)
+}
+
+func TestEnrichFromStoreKeepsExistingRolesOnStoreError(t *testing.T) {
 	user := &User{Email: "alice@example.com", Roles: []string{"admin"}}
 	store := errRoleStore{err: errors.New("database down")}
 
@@ -380,10 +424,10 @@ func TestEnrichFromStoreClearsOnStoreError(t *testing.T) {
 	mw(handler).ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Empty(t, gotRoles)
+	require.Equal(t, []string{"admin"}, gotRoles)
 }
 
-func TestEnrichFromStoreEmptyResult(t *testing.T) {
+func TestEnrichFromStoreEmptyStoreResultKeepsExistingRoles(t *testing.T) {
 	user := &User{Email: "alice@example.com", Roles: []string{"admin"}}
 	store := InMemoryRoleStore{}
 
@@ -400,5 +444,31 @@ func TestEnrichFromStoreEmptyResult(t *testing.T) {
 	mw(handler).ServeHTTP(rec, req)
 
 	require.Equal(t, http.StatusOK, rec.Code)
-	require.Empty(t, gotRoles)
+	require.Equal(t, []string{"admin"}, gotRoles)
+}
+
+// sliceRoleStore hands out its own backing slice, so a middleware that sorted
+// or compacted in place would corrupt every later request.
+type sliceRoleStore struct{ roles []string }
+
+func (s *sliceRoleStore) RolesByEmail(_ context.Context, _ string) ([]string, error) {
+	return s.roles, nil
+}
+
+func TestEnrichFromStoreDoesNotMutateStoreResult(t *testing.T) {
+	user := &User{Email: "alice@example.com"}
+	store := &sliceRoleStore{roles: []string{"editor", "admin"}}
+
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	})
+
+	mw := Chain(withUser(user), EnrichFromStore(store))
+
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	rec := httptest.NewRecorder()
+	mw(handler).ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Equal(t, []string{"editor", "admin"}, store.roles)
 }
