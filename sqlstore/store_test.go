@@ -3,6 +3,7 @@ package sqlstore
 import (
 	"database/sql"
 	"net/http"
+	"slices"
 	"testing"
 	"time"
 
@@ -92,4 +93,17 @@ func TestStore_AuthSetupEndToEnd(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "alice@example.com", user.Email)
 	assert.Equal(t, []string{"admin", "user"}, user.Roles)
+}
+
+func TestStore_TestRoles(t *testing.T) {
+	s := newStore(t)
+	ctx := t.Context()
+	require.NoError(t, s.SetUser(ctx, "alice@example.com", "first", "admin", "user"))
+	roles, err := s.Roles(ctx)
+	require.NoError(t, err)
+	require.Len(t, roles, 1)
+	aliceRoles := roles["alice@example.com"]
+	slices.Sort(aliceRoles)
+	require.Equal(t, []string{"admin", "user"}, aliceRoles)
+
 }
