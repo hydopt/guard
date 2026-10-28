@@ -52,7 +52,6 @@ func TestGoogleValidateToken(t *testing.T) {
 	g := &GoogleTokenValidator{
 		ClientId: clientId,
 		verifier: provider.Verifier(&oidc.Config{ClientID: clientId}),
-		fallback: provider.Verifier(&oidc.Config{ClientID: clientId}),
 	}
 
 	t.Run("validToken", func(t *testing.T) {
@@ -87,28 +86,34 @@ func TestGoogleValidateToken(t *testing.T) {
 	})
 }
 
-func TestGoogleValidateTokenFallbackIssuer(t *testing.T) {
-	const clientId = "my-test-client"
-	_, _, issuerA := newGoogleOidcServer(t)
-	_, privB, issuerB := newGoogleOidcServer(t)
+func TestNewGoogleTokenValidatorRequiresClientID(t *testing.T) {
+	_, err := NewGoogleTokenValidator("", "")
+	assert.ErrorContains(t, err, "client id")
+}
 
-	providerA, err := oidc.NewProvider(t.Context(), issuerA)
-	require.NoError(t, err)
-	providerB, err := oidc.NewProvider(t.Context(), issuerB)
-	require.NoError(t, err)
+func TestGoogleValidateTokenMultipleAudiences(t *testing.T) {
+	const webClient, desktopClient = "web-client", "desktop-client"
+	_, priv, issuer := newGoogleOidcServer(t)
 
+	provider, err := oidc.NewProvider(t.Context(), issuer)
+	require.NoError(t, err)
+	cfg := &oidc.Config{SkipClientIDCheck: true}
 	g := &GoogleTokenValidator{
-		ClientId: clientId,
-		verifier: providerA.Verifier(&oidc.Config{ClientID: clientId}),
-		fallback: providerB.Verifier(&oidc.Config{ClientID: clientId}),
+		ClientId:  webClient,
+		clientIDs: []string{webClient, desktopClient},
+		verifier:  provider.Verifier(cfg),
 	}
 
-	// Token from issuer B: the primary verifier (issuer A) rejects it, the
-	// fallback verifier (mirroring the legacy "accounts.google.com" keyset)
-	// accepts it.
-	token := signGoogleToken(t, issuerB, clientId, privB, "user@example.com", true)
-	user, err := g.ValidateToken(t.Context(), token)
-	require.NoError(t, err)
-	require.NotNil(t, user)
-	assert.Equal(t, "user@example.com", user.Email)
+	for _, clientID := range []string{webClient, desktopClient} {
+		token := signGoogleToken(t, issuer, clientID, priv, "user@example.com", true)
+		user, err := g.ValidateToken(t.Context(), token)
+		require.NoError(t, err, clientID)
+		assert.Equal(t, "user@example.com", user.Email)
+	}
+
+	token := signGoogleToken(t, issuer, "other-client", priv, "user@example.com", true)
+	_, err = g.ValidateToken(t.Context(), token)
+	assert.ErrorContains(t, err, "audience")
 }
+
+

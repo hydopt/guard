@@ -41,6 +41,7 @@ a, err := auth.Setup(mux,
     auth.Issuer("https://app.example.com"), // beats GUARD_ORIGIN
     auth.WithSessionKey(pemBytes),          // beats GUARD_SESSION_KEY
     auth.Google("client-id"),               // beats GOOGLE_CLIENT_ID
+    auth.GoogleDesktop("desktop-client-id"), // local-program tokens
     auth.WithTenant("my-tenant-guid"),      // beats AZURE_TENANT_ID
     auth.EmailPassword(store),              // add email/password login
     auth.WithRoleStore(roleStore),          // roles become token claims
@@ -60,12 +61,52 @@ files). Missing values fall back to their default.
 | `GUARD_ROLES` | role assignments, one `<email>;<role1>;<role2>;...` per line | no roles |
 | `GOOGLE_CLIENT_ID` | Google OAuth client ID | provider disabled |
 | `GOOGLE_CLIENT_SECRET` | Google client secret, literal or file path | public client (PKCE) |
+| `GOOGLE_DESKTOP_CLIENT_ID` | Google "Desktop app" client ID accepted by `POST /auth/token` | token exchange disabled for Google |
 | `AZURE_CLIENT_ID` | Microsoft OAuth client ID | provider disabled |
 | `AZURE_CLIENT_SECRET` | Microsoft client secret, literal or file path | public client (PKCE) |
 | `AZURE_TENANT_ID` | Microsoft tenant restriction | all tenants (`common`) |
 
 On Google Cloud or Azure, the `GOOGLE_*`/`AZURE_*` secrets can point at the
 mounted secret files; in docker-compose, at `/run/secrets/...` volumes.
+
+## Tokens for local programs
+
+A CLI or desktop app that needs to call a guard-protected service can sign in
+through the system browser and exchange the resulting Google ID token for a
+guard token. Create a Google OAuth client of type **Desktop app** and configure
+it on the server with `auth.GoogleDesktop(...)` or
+`GOOGLE_DESKTOP_CLIENT_ID`. This is separate from the **Web application** client
+used for browser sign-in; the desktop client needs no redirect URI.
+
+```go
+token, err := guard.GoogleLogin(ctx, guard.GoogleLoginConfig{
+    GuardURL: "https://auth.example.com",           // guard origin
+    ClientID: "123-abc.apps.googleusercontent.com", // Desktop app client
+})
+if err != nil { /* handle */ }
+req.Header.Set("Authorization", "Bearer "+token)
+```
+
+`GoogleLogin` binds a loopback listener on `127.0.0.1`, opens the browser,
+exchanges the authorization code with PKCE, and POSTs the ID token to
+`/auth/token`. It returns a guard Bearer token and writes nothing to disk.
+
+Non-Go clients can make the same exchange directly:
+
+```sh
+curl -sS -X POST https://auth.example.com/auth/token \
+  -d provider=google -d id_token="$GOOGLE_ID_TOKEN"
+# {"token":"...","token_type":"Bearer","expires_in":3600}
+```
+
+The endpoint is public and skipped by `Auth.RequireLogin` whenever a Google or
+Microsoft audience is configured. Roles are resolved from the same role store
+as browser sign-in.
+
+Google's documentation marks the desktop client secret as optional for the
+PKCE exchange; some Google projects still require it. If the token exchange
+returns an error, set `GoogleLoginConfig.ClientSecret` to the desktop client's
+secret (desktop clients are public, so this is not a confidential value).
 
 ### Session keys and serverless
 
@@ -175,8 +216,9 @@ handler := mw(mux)                     // only the sign-in flow is unguarded
 
 `PublicRoutes()` lists the exact-match paths the flow owns: `/signin`, each
 provider's start and callback route, logout, and local endpoints (like the
-email/password login and token routes). The flow keeps working no matter which
-`guard.Middleware` protects the `?next=` return target.
+email/password login and token routes, plus `/auth/token` for local programs).
+The flow keeps working no matter which `guard.Middleware` protects the `?next=`
+return target.
 
 Further APIs (signin, guard.Issuer, credential stores, components) are
 documented in the package docs.

@@ -355,6 +355,7 @@ func TestSetupPublicRoutes(t *testing.T) {
 		"/auth/logout",
 		"/auth/microsoft",
 		"/auth/microsoft/callback",
+		"/auth/token",
 		"/signin",
 	}, a.PublicRoutes())
 
