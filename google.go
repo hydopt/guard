@@ -4,39 +4,64 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 
 	"github.com/coreos/go-oidc/v3/oidc"
 )
 
-const (
-	googleIssuer       = "https://accounts.google.com"
-	googleIssuerLegacy = "accounts.google.com"
-	googleJWKSURL      = "https://www.googleapis.com/oauth2/v3/certs"
-)
+const googleIssuer = "https://accounts.google.com"
 
 var _ TokenValidator = (*GoogleTokenValidator)(nil)
 
 type GoogleTokenValidator struct {
-	ClientId string
-	verifier *oidc.IDTokenVerifier
-	fallback *oidc.IDTokenVerifier
+	// ClientId is the first accepted audience, kept for callers that inspect
+	// the validator. Validation accepts every ID in clientIDs.
+	ClientId  string
+	clientIDs []string
+	verifier  *oidc.IDTokenVerifier
 }
 
-// NewGoogleTokenValidator creates a validator for Google ID tokens. The
-// verifier accepts both issuer spellings used by Google over the years:
-// "https://accounts.google.com" and the legacy "accounts.google.com".
-func NewGoogleTokenValidator(clientId string) (*GoogleTokenValidator, error) {
+// NewGoogleTokenValidator creates a validator for Google ID tokens issued to
+// any of the given client IDs. Browser sign-in uses a web client, while local
+// programs exchanging tokens via POST /auth/token use a desktop client, so the
+// validator can accept both audiences.
+func NewGoogleTokenValidator(clientIDs ...string) (*GoogleTokenValidator, error) {
+	ids := make([]string, 0, len(clientIDs))
+	for _, id := range clientIDs {
+		if id != "" && !slices.Contains(ids, id) {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return nil, errors.New("google token validator requires a client id")
+	}
 	ctx := context.Background()
 	provider, err := oidc.NewProvider(ctx, googleIssuer)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create google token provider: %w", err)
 	}
-	config := &oidc.Config{ClientID: clientId}
+	// Audience is checked in ValidateToken so multiple client IDs are accepted.
+	config := &oidc.Config{SkipClientIDCheck: true}
 	return &GoogleTokenValidator{
-		ClientId: clientId,
-		verifier: provider.Verifier(config),
-		fallback: oidc.NewVerifier(googleIssuerLegacy, oidc.NewRemoteKeySet(ctx, googleJWKSURL), config),
+		ClientId:  ids[0],
+		clientIDs: ids,
+		verifier:  provider.Verifier(config),
 	}, nil
+}
+
+// acceptsAudience reports whether the token was issued to one of the accepted
+// client IDs.
+func (g *GoogleTokenValidator) acceptsAudience(audience []string) bool {
+	ids := g.clientIDs
+	if len(ids) == 0 && g.ClientId != "" {
+		ids = []string{g.ClientId}
+	}
+	for _, aud := range audience {
+		if slices.Contains(ids, aud) {
+			return true
+		}
+	}
+	return false
 }
 
 type googleClaims struct {
@@ -48,10 +73,10 @@ type googleClaims struct {
 func (g *GoogleTokenValidator) ValidateToken(ctx context.Context, token string) (*User, error) {
 	idToken, err := g.verifier.Verify(ctx, token)
 	if err != nil {
-		idToken, err = g.fallback.Verify(ctx, token)
-		if err != nil {
-			return nil, err
-		}
+		return nil, err
+	}
+	if !g.acceptsAudience(idToken.Audience) {
+		return nil, fmt.Errorf("token audience %v is not accepted", idToken.Audience)
 	}
 
 	var claims googleClaims

@@ -10,6 +10,7 @@ import (
 	"log/slog"
 	"net/http"
 	"os"
+	"slices"
 	"strings"
 	"time"
 
@@ -34,13 +35,14 @@ const (
 // secret or the path of a file containing it (see LoadSecret). A provider
 // client secret left unset records a public (PKCE-only) client.
 const (
-	EnvOrigin            = "GUARD_ORIGIN"
-	EnvSessionKey        = "GUARD_SESSION_KEY"
-	EnvGoogleClientID    = "GOOGLE_CLIENT_ID"
-	EnvGoogleSecret      = "GOOGLE_CLIENT_SECRET"
-	EnvMicrosoftClientID = "AZURE_CLIENT_ID"
-	EnvMicrosoftSecret   = "AZURE_CLIENT_SECRET"
-	EnvMicrosoftTenant   = "AZURE_TENANT_ID"
+	EnvOrigin                = "GUARD_ORIGIN"
+	EnvSessionKey            = "GUARD_SESSION_KEY"
+	EnvGoogleClientID        = "GOOGLE_CLIENT_ID"
+	EnvGoogleSecret          = "GOOGLE_CLIENT_SECRET"
+	EnvGoogleDesktopClientID = "GOOGLE_DESKTOP_CLIENT_ID"
+	EnvMicrosoftClientID     = "AZURE_CLIENT_ID"
+	EnvMicrosoftSecret       = "AZURE_CLIENT_SECRET"
+	EnvMicrosoftTenant       = "AZURE_TENANT_ID"
 )
 
 // Auth is what Setup returns. Use the RequireLogin, OptionalAuth, and
@@ -54,20 +56,32 @@ type Auth struct {
 	Validators []guard.TokenValidator
 	// JWKSURL is the absolute discovery URL for the guard signing keys.
 	JWKSURL string
+
+	// exchange maps provider names to the validators used by
+	// POST /auth/token to trade a provider ID token for a guard token.
+	exchange   map[string]guard.TokenValidator
+	sessionTTL time.Duration
 }
 
 // RequireLogin returns middleware that redirects unauthenticated GET/HEAD
 // requests to the sign-in page and rejects other methods with 401. When no
-// sign-in flow is configured (issuer-only mode), it always returns 401.
+// sign-in flow is configured (issuer-only mode), it rejects all requests
+// except the token exchange endpoint (when a provider audience is configured).
 func (a *Auth) RequireLogin() guard.Middleware {
+	var mw guard.Middleware
 	if a.Flow == nil {
-		return func(next http.Handler) http.Handler {
+		mw = func(next http.Handler) http.Handler {
 			return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				http.Error(w, "no sign-in flow configured; issuer-only mode does not accept credentials", http.StatusUnauthorized)
 			})
 		}
+	} else {
+		mw = a.Flow.RequireLogin(a.Validators)
 	}
-	return a.Flow.RequireLogin(a.Validators)
+	if len(a.exchange) == 0 {
+		return mw
+	}
+	return guard.SkipPaths([]string{guard.TokenExchangePath}, mw)
 }
 
 // OptionalAuth returns middleware that passes through unauthenticated requests.
@@ -83,16 +97,22 @@ func (a *Auth) RequireVerifiedEmail() guard.Middleware {
 }
 
 // PublicRoutes returns the exact-match paths the sign-in flow owns and must
-// stay reachable for a browser to complete login (/signin, the provider start
-// and callback routes, logout, and local provider endpoints). Wrap the rest of
-// the app with any guard middleware while keeping the flow alive:
+// stay reachable for a browser or local program to complete login (/signin,
+// the provider start and callback routes, logout, local provider endpoints,
+// and the token exchange endpoint). Wrap the rest of the app with any guard
+// middleware while keeping the flow alive:
 //
 //	mw := guard.SkipPaths(a.PublicRoutes(), a.RequireLogin())
 func (a *Auth) PublicRoutes() []string {
-	if a.Flow == nil {
-		return nil
+	var routes []string
+	if a.Flow != nil {
+		routes = a.Flow.PublicRoutes()
 	}
-	return a.Flow.PublicRoutes()
+	if len(a.exchange) > 0 {
+		routes = append(routes, guard.TokenExchangePath)
+		slices.Sort(routes)
+	}
+	return routes
 }
 
 // Option configures Setup.
@@ -100,6 +120,7 @@ type Option func(*config)
 
 type config struct {
 	googleClientID     string
+	googleDesktopID    string
 	microsoftClientID  string
 	googleSecret       string
 	microsoftSecret    string
@@ -118,6 +139,15 @@ type config struct {
 // what downstream services accept.
 func Google(clientID string) Option {
 	return func(c *config) { c.googleClientID = clientID }
+}
+
+// GoogleDesktop accepts Google ID tokens issued to a "Desktop app" OAuth
+// client when local programs trade them at POST /auth/token for a guard token.
+// It does not add Google to the browser sign-in page; use Google for that.
+// Configure the same desktop client ID in the local program
+// (guard.GoogleLoginConfig.ClientID).
+func GoogleDesktop(clientID string) Option {
+	return func(c *config) { c.googleDesktopID = clientID }
 }
 
 // Microsoft enables the Microsoft Entra ID sign-in provider for the given
@@ -196,8 +226,8 @@ func WithSessionTTL(ttl time.Duration) Option {
 // WithValidator replaces the automatically constructed boundary validator for
 // a provider (name "google" or "microsoft"). Useful for custom validators, e.g.
 // national clouds, and avoids the provider discovery network call. It only
-// affects the sign-in boundary; it does not add the provider's tokens to
-// Auth.Validators.
+// affects the sign-in boundary (including POST /auth/token); it does not add
+// the provider's tokens to Auth.Validators.
 func WithValidator(name string, v guard.TokenValidator) Option {
 	return func(c *config) { c.validators[name] = v }
 }
@@ -208,11 +238,12 @@ func WithValidator(name string, v guard.TokenValidator) Option {
 //
 // Configuration falls back to environment variables when the corresponding
 // option is not given (GUARD_ORIGIN, GUARD_SESSION_KEY, GUARD_ROLES,
-// GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, AZURE_CLIENT_ID, AZURE_CLIENT_SECRET,
-// AZURE_TENANT_ID); explicit options always win. GUARD_ORIGIN (or auth.Issuer)
-// is required. When GUARD_ROLES is set (and no WithRoleStore is given), role
-// assignments are read from it as "<email>;<role1>;<role2>;..." per line and
-// end up as claims on every minted token.
+// GOOGLE_CLIENT_ID, GOOGLE_CLIENT_SECRET, GOOGLE_DESKTOP_CLIENT_ID,
+// AZURE_CLIENT_ID, AZURE_CLIENT_SECRET, AZURE_TENANT_ID); explicit options
+// always win. GUARD_ORIGIN (or auth.Issuer) is required. When GUARD_ROLES is
+// set (and no WithRoleStore is given), role assignments are read from it as
+// "<email>;<role1>;<role2>;..." per line and end up as claims on every minted
+// token.
 func Setup(mux *http.ServeMux, opts ...Option) (*Auth, error) {
 	cfg := config{
 		validators: make(map[string]guard.TokenValidator),
@@ -255,6 +286,9 @@ func Setup(mux *http.ServeMux, opts ...Option) (*Auth, error) {
 	if cfg.googleClientID, err = resolve(EnvGoogleClientID, cfg.googleClientID, ""); err != nil {
 		return nil, err
 	}
+	if cfg.googleDesktopID, err = resolve(EnvGoogleDesktopClientID, cfg.googleDesktopID, ""); err != nil {
+		return nil, err
+	}
 	if cfg.googleSecret, err = resolve(EnvGoogleSecret, cfg.googleSecret, ""); err != nil {
 		return nil, err
 	}
@@ -293,21 +327,25 @@ func Setup(mux *http.ServeMux, opts ...Option) (*Auth, error) {
 	}
 
 	providers := make([]signin.Provider, 0, 3)
+	exchange := make(map[string]guard.TokenValidator)
 
-	if cfg.googleClientID != "" {
+	if cfg.googleClientID != "" || cfg.googleDesktopID != "" {
 		google, err := newGoogleValidator(cfg)
 		if err != nil {
 			return nil, err
 		}
-		providers = append(providers, signin.Provider{
-			Name:         googleProvider,
-			Label:        "Google",
-			ClientID:     cfg.googleClientID,
-			ClientSecret: cfg.googleSecret,
-			Endpoint:     googleoauth.Endpoint,
-			Validator:    google,
-		})
-		logSecretless(googleProvider, cfg.googleSecret)
+		exchange[googleProvider] = google
+		if cfg.googleClientID != "" {
+			providers = append(providers, signin.Provider{
+				Name:         googleProvider,
+				Label:        "Google",
+				ClientID:     cfg.googleClientID,
+				ClientSecret: cfg.googleSecret,
+				Endpoint:     googleoauth.Endpoint,
+				Validator:    google,
+			})
+			logSecretless(googleProvider, cfg.googleSecret)
+		}
 	}
 
 	if cfg.microsoftClientID != "" {
@@ -315,6 +353,7 @@ func Setup(mux *http.ServeMux, opts ...Option) (*Auth, error) {
 		if err != nil {
 			return nil, err
 		}
+		exchange[microsoftProvider] = microsoft
 		providers = append(providers, signin.Provider{
 			Name:         microsoftProvider,
 			Label:        "Microsoft",
@@ -356,6 +395,12 @@ func Setup(mux *http.ServeMux, opts ...Option) (*Auth, error) {
 		})
 	}
 
+	result.exchange = exchange
+	result.sessionTTL = cfg.sessionTTL
+	if len(exchange) > 0 {
+		mux.HandleFunc(guard.TokenExchangePath, result.handleTokenExchange)
+	}
+
 	if len(providers) > 0 {
 		flow, err := signin.New(signin.Config{
 			Providers:  providers,
@@ -376,7 +421,7 @@ func newGoogleValidator(cfg config) (guard.TokenValidator, error) {
 	if v, ok := cfg.validators[googleProvider]; ok {
 		return v, nil
 	}
-	v, err := guard.NewGoogleTokenValidator(cfg.googleClientID)
+	v, err := guard.NewGoogleTokenValidator(cfg.googleClientID, cfg.googleDesktopID)
 	if err != nil {
 		return nil, fmt.Errorf("auth: google: %w", err)
 	}
